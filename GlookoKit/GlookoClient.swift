@@ -16,13 +16,18 @@ public final class GlookoClient: @unchecked Sendable {
     public static let sessionCookieName = "_logbook-web_session"
 
     public let region: Region
-    public var sessionCookie: String?
+    private let lock = NSLock()
+    private var cookie: String?
+    public var sessionCookie: String? {
+        get { lock.lock(); defer { lock.unlock() }; return cookie }
+        set { lock.lock(); defer { lock.unlock() }; cookie = newValue }
+    }
     private let session: URLSession
     private let deviceInformation: String
 
     public init(region: Region = .eu, sessionCookie: String? = nil, deviceId: String = UUID().uuidString) {
         self.region = region
-        self.sessionCookie = sessionCookie
+        self.cookie = sessionCookie
         let config = URLSessionConfiguration.ephemeral
         config.httpCookieAcceptPolicy = .never
         config.httpShouldSetCookies = false
@@ -45,6 +50,7 @@ public final class GlookoClient: @unchecked Sendable {
         public var status: Int
         public var body: Data
         public var setCookies: [HTTPCookie]
+        public var contentType: String? = nil
         public var text: String { String(decoding: body, as: UTF8.self) }
     }
 
@@ -63,11 +69,13 @@ public final class GlookoClient: @unchecked Sendable {
         ]
         for host in region.signInHosts {
             for (path, body) in attempts {
+                try Task.checkCancellation()
                 let result: HTTPResult
                 do {
                     result = try await send("POST", host: host, path: path,
                                             body: try JSONSerialization.data(withJSONObject: body), authenticated: false)
                 } catch {
+                    if Task.isCancelled { throw CancellationError() }
                     failures.append("\(host)\(path): \(error.localizedDescription)"); continue
                 }
                 lastSignInDiagnostics = "HTTP \(result.status); cookies " +
@@ -97,9 +105,8 @@ public final class GlookoClient: @unchecked Sendable {
     /// `PUT /api/v2/<resource>` with `{ "<key>": records }`, the app's upsert shape. The key defaults to the
     /// camelCase last path component (`pumps/normal_boluses` → `normalBoluses`), matching the GET pages.
     public func put(resource: String, records: [[String: Any]], key: String? = nil, host: String? = nil) async throws -> HTTPResult {
-        let last = resource.split(separator: "/").last.map(String.init) ?? resource
-        let parts = last.split(separator: "_")
-        let key = key ?? (String(parts[0]) + parts.dropFirst().map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined())
+        let resourceKey = try Self.resourceKey(resource)
+        let key = key ?? resourceKey
         let body = try JSONSerialization.data(withJSONObject: [key: records])
         return try await send("PUT", host: host ?? region.dataHost, path: "/api/v2/\(resource)", body: body, authenticated: true)
     }
@@ -120,11 +127,22 @@ public final class GlookoClient: @unchecked Sendable {
             guard let cookie = sessionCookie else { throw GlookoError.notSignedIn }
             req.setValue(cookie, forHTTPHeaderField: "Cookie")
         }
-        let (data, response) = try await session.data(for: req)
-        let http = response as! HTTPURLResponse
+        try Task.checkCancellation()
+        let (data, response) = try await session.data(for: req, delegate: RefuseRedirects.shared)
+        guard let http = response as? HTTPURLResponse else { throw GlookoError.invalidResponse }
         let fields = http.allHeaderFields.reduce(into: [String: String]()) { $0["\($1.key)"] = "\($1.value)" }
         let cookies = HTTPCookie.cookies(withResponseHeaderFields: fields, for: url)
-        return HTTPResult(status: http.statusCode, body: data, setCookies: cookies)
+        return HTTPResult(status: http.statusCode, body: data, setCookies: cookies,
+                          contentType: http.value(forHTTPHeaderField: "Content-Type"))
+    }
+
+    static func resourceKey(_ resource: String) throws -> String {
+        guard resource.range(of: #"^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*(?:/[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*)*$"#,
+                             options: .regularExpression) != nil,
+              let last = resource.split(separator: "/").last else { throw GlookoError.invalidResource }
+        let parts = last.split(separator: "_")
+        guard let first = parts.first else { throw GlookoError.invalidResource }
+        return String(first) + parts.dropFirst().map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined()
     }
 
     static func keys(_ data: Data) -> String {
@@ -157,14 +175,26 @@ public final class GlookoClient: @unchecked Sendable {
     }
 }
 
+private final class RefuseRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static let shared = RefuseRedirects()
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
 public enum GlookoError: Error, CustomStringConvertible {
-    case signInFailed([String]), twoFactorRequired, notSignedIn, badURL(String)
+    case signInFailed([String]), twoFactorRequired, notSignedIn, badURL(String), invalidResource, invalidResponse
+    case authenticationRequired(Int)
     public var description: String {
         switch self {
         case .signInFailed(let f): return "Sign-in failed:\n  " + f.joined(separator: "\n  ")
         case .twoFactorRequired: return "Account requires two-step verification (not supported yet)"
-        case .notSignedIn: return "No session; run `glooko-probe login` first"
+        case .notSignedIn: return "Sign in to Glooko again"
         case .badURL(let p): return "Bad URL path \(p)"
+        case .invalidResource: return "Invalid Glooko resource name"
+        case .invalidResponse: return "Glooko returned an unexpected response"
+        case .authenticationRequired: return "The Glooko session has expired; sign in again"
         }
     }
 }

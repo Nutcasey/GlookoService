@@ -13,10 +13,10 @@ public enum GlookoRecords {
     /// A manual insulin entry, as `PUT /api/v2/insulins` expects it.
     public static func insulin(guid: String, timestamp: Date, units: Double, type: String,
                                medicationGuid: String = "NOVO_NOVORAPID", deleted: Bool = false,
-                               extra: [String: Any] = [:]) -> [String: Any] {
+                               extra: [String: Any] = [:], timeZone: TimeZone = .current) -> [String: Any] {
         let now = GlookoClient.isoTimestamp(Date())
         var r: [String: Any] = [
-            "guid": guid, "timestamp": WallClock().string(timestamp), "value": units,
+            "guid": guid, "timestamp": WallClock(timeZone: timeZone).string(timestamp), "value": units,
             "insulinType": type, "medicationGuid": medicationGuid, "softDeleted": deleted ? 1 : 0,
             "deviceDelivered": 0, "manuallyEnteredText": false,
             "pumpGuid": NSNull(), "insulinPenGuid": NSNull(), "cgmDeviceGuid": NSNull(), "externalId": NSNull(),
@@ -28,9 +28,10 @@ public enum GlookoRecords {
 
     /// A Quick Add carb entry is a meal plus a food linked by `mealGuid`.
     public static func carbs(mealGuid: String, foodGuid: String, timestamp: Date, grams: Double,
-                             mealType: String = "snack", deleted: Bool = false) -> (meal: [String: Any], food: [String: Any]) {
+                             mealType: String = "snack", deleted: Bool = false,
+                             timeZone: TimeZone = .current) -> (meal: [String: Any], food: [String: Any]) {
         let now = GlookoClient.isoTimestamp(Date())
-        let ts = WallClock().string(timestamp)
+        let ts = WallClock(timeZone: timeZone).string(timestamp)
         let meal: [String: Any] = [
             "guid": mealGuid, "type": mealType, "timestamp": ts, "name": NSNull(), "favoriteGuid": NSNull(),
             "contextTagGuids": [String](), "softDeleted": deleted ? 1 : 0, "updatedAt": now,
