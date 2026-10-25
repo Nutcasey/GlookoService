@@ -44,9 +44,9 @@ public extension GlookoClient {
         guard pageLimit > 0, maxPages > 0, !resource.isEmpty else {
             return SyncScan(outcome: .invalidResponse("resource and positive page limits are required"), records: [])
         }
-        let last = resource.split(separator: "/").last.map(String.init) ?? resource
-        let parts = last.split(separator: "_")
-        let key = String(parts[0]) + parts.dropFirst().map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined()
+        guard let key = try? Self.resourceKey(resource) else {
+            return SyncScan(outcome: .invalidResponse("invalid resource name"), records: [])
+        }
         var since = initialSince, lastGuid = "00000000-0000-0000-0000-000000000000"
         var all: [[String: Any]] = []
         var cursors = Set<String>()
@@ -85,7 +85,8 @@ public extension GlookoClient {
 /// Destination time encoding: Glooko stores local wall-clock time with a literal `Z` (25 Oct 2026 finding).
 public struct WallClock {
     public let timeZone: TimeZone
-    public init(_ identifier: String = "Europe/London") { timeZone = TimeZone(identifier: identifier)! }
+    public init(timeZone: TimeZone = .current) { self.timeZone = timeZone }
+    public init(_ identifier: String) { timeZone = TimeZone(identifier: identifier) ?? .current }
 
     public func string(_ date: Date) -> String {
         let f = DateFormatter()

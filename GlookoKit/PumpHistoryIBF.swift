@@ -80,17 +80,20 @@ public struct PumpHistoryIBF: Sendable {
     public var powerUp: Date
     /// 48 half-hour scheduled rates (U/h) for basal programme 0.
     public var basalProgram: [Double]
+    public var settings: IBFPumpSettings?
     /// Chronological history; indices strictly increasing.
     public var events: [IBFHistoryEvent]
 
     public init(serial: UInt32, name: String = "LOOP", timeZone: TimeZone, powerUp: Date,
-                basalProgram: [Double] = Array(repeating: 0, count: 48), events: [IBFHistoryEvent]) {
+                basalProgram: [Double] = Array(repeating: 0, count: 48), events: [IBFHistoryEvent], settings: IBFPumpSettings? = nil) {
         self.serial = serial; self.name = name; self.timeZone = timeZone; self.powerUp = powerUp
         self.basalProgram = basalProgram; self.events = events
+        self.settings = settings
     }
 
     public enum EncodingError: Error, Equatable {
         case invalidSerial, emptyHistory, unorderedHistory(index: UInt32), beforePowerUp, invalidBasalProgram, nameTooLong
+        case missingSettings, invalidSettings, invalidRecord
     }
 
     static let endDay: UInt16 = 0x08, newDay: UInt16 = 0x02, inProgressFlag: UInt16 = 0x04
@@ -111,6 +114,19 @@ public struct PumpHistoryIBF: Sendable {
         guard (1...999_999_999).contains(serial) else { throw EncodingError.invalidSerial }
         guard let last = events.last else { throw EncodingError.emptyHistory }
         guard basalProgram.count == 48 else { throw EncodingError.invalidBasalProgram }
+        guard let settings else { throw EncodingError.missingSettings }
+        try settings.validate()
+        for event in events {
+            switch event.record {
+            case let .basal(rate, minutes):
+                guard rate.isFinite, rate >= 0, rate < 65535, minutes >= 0, minutes <= 65535 else { throw EncodingError.invalidRecord }
+            case let .bolus(units, seconds):
+                guard units.isFinite, units >= 0, units < 65535, seconds >= 0, seconds <= 65535 else { throw EncodingError.invalidRecord }
+            case let .terminateBolus(units):
+                guard units.isFinite, units >= 0, units < 65535 else { throw EncodingError.invalidRecord }
+            default: break
+            }
+        }
         guard name.utf8.count < 23 else { throw EncodingError.nameTooLong }
         for i in events.indices.dropFirst() where events[i].index <= events[i - 1].index || events[i].date < events[i - 1].date {
             throw EncodingError.unorderedHistory(index: events[i].index)
@@ -122,17 +138,25 @@ public struct PumpHistoryIBF: Sendable {
         records.append([0, 2, 0, 5, 0, 0, 2, 0, 0, 2, 2, 0, 2, 1, 0])
         records.append(string(name, 23))
         var names = be16(7) + be16(0) + be16(32)
-        for index in 0..<7 { names += be16(UInt16(index)) + string("\(name) \(index)", 32) }
+        for index in 0..<7 { names += be16(UInt16(index)) + string(index == 0 ? name : "Unused \(index)", 32) }
         records.append(names)
         var eeprom = [UInt8](repeating: 0, count: 120)
-        let maxBasal = UInt32(((basalProgram.max() ?? 0) * 100).rounded())
-        eeprom.replaceSubrange(13..<31, with: [5, 1000, max(300, maxBasal), 10].flatMap { le32(UInt32($0)) } + [0, 0])
+        let maxBasal = UInt32((settings.maximumBasal * 100).rounded())
+        let maxBolus = UInt32((settings.maximumBolus * 100).rounded())
+        // Keep the known accepted Eros hardware descriptors (0.05 U increment / 10 U reserve). These describe
+        // the virtual PDM, not the attached pump. Every exported therapy value below comes from Loop.
+        eeprom.replaceSubrange(13..<31, with: [5, maxBolus, maxBasal, 10].flatMap(le32) + [0, 0])
         eeprom.replaceSubrange(53..<57, with: le32(serial))
-        eeprom.replaceSubrange(76..<90, with: [0, 0, 0, 1, 1, 0, 0] + [70, 100, 120].flatMap { le16(UInt16($0)) } + [8])
+        let glucoseBounds = [settings.minimumGlucoseMGDL, settings.targetMGDL[0], settings.correctionThresholdMGDL[0]]
+        eeprom.replaceSubrange(76..<90, with: [0, 0, 0, 1, 1, settings.glucoseDisplayMMOL ? 1 : 0, 0] +
+                               glucoseBounds.flatMap { le16(UInt16($0.rounded())) } +
+                               [UInt8(clamping: Int((Double(settings.insulinActionMinutes) / 30).rounded()))])
         records.append(eeprom)
-        let program = basalProgram.map { UInt32(max(0, ($0 * 100).rounded())) }
+        let program = settings.basal.map { UInt32(($0 * 100).rounded()) }
+        let profiles = [11: settings.carbRatio, 12: settings.sensitivityMGDL,
+                        13: settings.targetMGDL, 14: settings.correctionThresholdMGDL]
         for index in Array(15...21) + [12, 11, 13, 14] {
-            let values: [UInt32] = index == 15 ? program : Array(repeating: [11: 15, 12: 50, 13: 100, 14: 120][index] ?? 0, count: 48)
+            let values: [UInt32] = index == 15 ? program : profiles[index]?.map { UInt32($0.rounded()) } ?? Array(repeating: 0, count: 48)
             let header = [UInt8(index)] + be32(1) + be16(196) + be16(0) + le32(86400)
             records.append(header + values.flatMap(le32))
         }
@@ -154,7 +178,9 @@ public struct PumpHistoryIBF: Sendable {
         let flags = flags()
         for (event, flag) in zip(events, flags).reversed() {
             let c = clock(event)
-            let sincePowerUp = UInt32(event.date.timeIntervalSince(powerUp).rounded(.down)) + 86400
+            let elapsed = event.date.timeIntervalSince(powerUp).rounded(.down)
+            guard elapsed.isFinite, elapsed >= 0, elapsed < Double(UInt32.max - 86400) else { throw EncodingError.invalidRecord }
+            let sincePowerUp = UInt32(elapsed) + 86400
             var bytes = [UInt8(3)] + be32(event.index) + be16(76) + be16(0)
             bytes += [c.day, c.month] + le16(c.year) + [c.second, c.minute, c.hour, 0]
             bytes += le32(sincePowerUp) + le32(event.record.kind) + le16(flag) + [0, 0] + event.record.payload
@@ -219,7 +245,7 @@ public enum DeliveryTimeline {
 
     /// Converts intervals and boluses to chronological PDM records ending at `through`.
     public static func records(intervals: [Interval], boluses: [Bolus], carbs: [Carb] = [],
-                               timeZone: TimeZone, through: Date, gapTolerance: TimeInterval = 60) -> [Record] {
+                               timeZone: TimeZone, through: Date, gapTolerance: TimeInterval = 0) -> [Record] {
         window(intervals: intervals, boluses: boluses, carbs: carbs, timeZone: timeZone, through: through,
                gapTolerance: gapTolerance).records
     }
@@ -233,15 +259,17 @@ public enum DeliveryTimeline {
     /// - The basal record still running at `through` is flagged in progress.
     public static func window(intervals: [Interval], boluses: [Bolus], carbs: [Carb] = [], timeZone: TimeZone,
                               from: Date? = nil, initial: State? = nil, through: Date,
-                              gapTolerance: TimeInterval = 60) -> (records: [Record], final: State?) {
+                              gapTolerance: TimeInterval = 0) -> (records: [Record], final: State?) {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
         func isMidnight(_ date: Date) -> Bool { calendar.startOfDay(for: date) == date }
         var basal: [Record] = []
         // Supersession is real and applies before windowing; the window edges are not, so a temp record's
         // duration always comes from its dose's own (superseded) end.
-        var whole = intervals.filter { $0.end > $0.start }.sorted { $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end }
+        var whole = intervals.filter { $0.start.timeIntervalSince1970.isFinite && $0.end.timeIntervalSince1970.isFinite && $0.end > $0.start }
+            .sorted { $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end }
         for i in whole.indices.dropLast() where whole[i].end > whole[i + 1].start { whole[i].end = whole[i + 1].start }
+        whole = whole.flatMap(quantised)
         let sorted = whole.compactMap { interval -> (interval: Interval, end: Date)? in
             var clipped = interval
             if let from { clipped.start = max(clipped.start, from) }
@@ -261,11 +289,11 @@ public enum DeliveryTimeline {
                 suspend(date)
                 state?.id = interval.id
             case let .scheduled(rate), let .temporary(rate):
-                let continuing = state?.isDelivering == true && state?.id != nil && state?.id == interval.id
+                let continuing = state?.delivery == interval.delivery && state?.id != nil && state?.id == interval.id
                 if continuing && !isMidnight(date) { return }
                 if state?.delivery == .suspended { basal.append((date, .resume, false)) }
                 var minutes = 0
-                if case .temporary = interval.delivery { minutes = max(1, Int((doseEnd.timeIntervalSince(date) / 60).rounded())) }
+                if case .temporary = interval.delivery { minutes = max(1, Int((doseEnd.timeIntervalSince(date) / 60).rounded(.up))) }
                 basal.append((date, .basal(rate: rate, tempMinutes: minutes), false))
                 state = State(delivery: interval.delivery, id: interval.id)
             }
@@ -286,7 +314,7 @@ public enum DeliveryTimeline {
         }
 
         var all = basal
-        for bolus in boluses where bolus.start < through && bolus.start >= (from ?? .distantPast) {
+        for bolus in boluses where bolus.start < through && bolus.end <= through && bolus.start >= (from ?? .distantPast) {
             all.append((bolus.start, .bolus(delivered: bolus.delivered,
                                              immediateSeconds: max(1, Int(bolus.end.timeIntervalSince(bolus.start).rounded()))), false))
             if bolus.programmed - bolus.delivered >= 0.005 {
@@ -304,6 +332,54 @@ public enum DeliveryTimeline {
             return a.offset < b.offset
         }.map(\.element)
         return (ordered, state)
+    }
+
+    /// IBF stores hundredths of U/h and whole seconds. Adjacent native rates preserve the source volume
+    /// to half a rate-second (0.0000014 U), rather than accumulating rate rounding over a day. Bound each
+    /// pair to a UTC hour so the intermediate deviation also stays below 0.0025 U. IDs and split times
+    /// depend on the whole source interval, so continuation remains stable across commitment windows.
+    private static func quantised(_ interval: Interval) -> [Interval] {
+        let rate: Double
+        switch interval.delivery {
+        case .suspended: return [interval]
+        case let .scheduled(value), let .temporary(value): rate = value
+        }
+        guard rate.isFinite, rate >= 0, rate < 65535 else { return [interval] }
+        let start = floor(interval.start.timeIntervalSince1970)
+        let end = floor(interval.end.timeIntervalSince1970)
+        guard end > start else { return [] }
+        let adjusted = rate * interval.end.timeIntervalSince(interval.start) / (end - start)
+        let low = floor(adjusted * 100 + 1e-9) / 100
+        let fraction = max(0, min(1, (adjusted - low) * 100))
+        func delivery(_ value: Double) -> Delivery {
+            if case .temporary = interval.delivery { return .temporary(rate: value) }
+            return .scheduled(rate: value)
+        }
+        if fraction < 1e-8 {
+            return [Interval(start: Date(timeIntervalSince1970: start), end: Date(timeIntervalSince1970: end),
+                             delivery: delivery(low), id: interval.id)]
+        }
+        var result: [Interval] = []
+        var cursor = start
+        var remainder = 0.0
+        while cursor < end {
+            let boundary = min(end, (floor(cursor / 3600) + 1) * 3600)
+            let seconds = boundary - cursor
+            let wanted = fraction * seconds + remainder
+            let highSeconds = min(seconds, max(0, wanted.rounded()))
+            remainder = wanted - highSeconds
+            let split = boundary - highSeconds
+            if split > cursor {
+                result.append(.init(start: Date(timeIntervalSince1970: cursor), end: Date(timeIntervalSince1970: split),
+                                    delivery: delivery(low), id: interval.id.map { "\($0):\(Int(cursor)):lo" }))
+            }
+            if boundary > split {
+                result.append(.init(start: Date(timeIntervalSince1970: split), end: Date(timeIntervalSince1970: boundary),
+                                    delivery: delivery(low + 0.01), id: interval.id.map { "\($0):\(Int(cursor)):hi" }))
+            }
+            cursor = boundary
+        }
+        return result
     }
 }
 

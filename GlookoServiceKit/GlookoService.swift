@@ -2,116 +2,22 @@ import Foundation
 import os.log
 import LoopKit
 
-/// Reporting-only Loop service that sends Loop's pump insulin history to Glooko.
-///
-/// Glooko accepts pump history as an Insulet PDM download (IBF) posted to the patient web upload route,
-/// so this service keeps a durable virtual-PDM history (`PumpHistoryLog`) and uploads it. It never
-/// doses, changes settings or acts on remote commands.
+/// Reporting only. All owned state and disk transactions share one queue; external callbacks run outside it.
 public final class GlookoService: Service {
     public static let pluginIdentifier = "GlookoService"
     public static let localizedTitle = "Glooko"
-
+    public static let stateDidChange = Notification.Name("GlookoServiceStateDidChange")
     public weak var serviceDelegate: ServiceDelegate?
     public weak var stateDelegate: StatefulPluggableDelegate?
-
-    /// Glooko account e-mail; the password and session live in the Keychain.
-    public private(set) var email: String?
-    public private(set) var isOnboarded: Bool
-    public private(set) var status: Status
 
     public struct Status: Equatable {
         public var lastUploadAt: Date?
         public var lastAttemptAt: Date?
         public var lastError: String?
         public var uploadedThrough: Date?
+        public var lastConfirmedAt: Date?
+        public var verificationDetail: String?
     }
-
-    private let log = OSLog(subsystem: "com.loopkit.GlookoService", category: "GlookoService")
-    private let queue = DispatchQueue(label: "com.loopkit.GlookoService")
-    private var history: PumpHistoryLog
-    private var basalProgram: [Double]?
-    private var uploading = false
-    private var client: GlookoClient?
-    /// Minimum spacing between automatic uploads. Loop calls in every five minutes.
-    private let uploadInterval: TimeInterval = 15 * 60
-    public static let region = GlookoClient.Region(signInHosts: ["eu.api.glooko.com", "global.api.glooko.com"],
-                                                   dataHost: "eu.api.glooko.com")
-
-    public init() {
-        isOnboarded = false
-        status = Status()
-        history = Self.loadHistory() ?? PumpHistoryLog.newIdentity()
-    }
-
-    public init?(rawState: RawStateValue) {
-        email = rawState["email"] as? String
-        isOnboarded = rawState["isOnboarded"] as? Bool ?? false
-        status = Status(lastUploadAt: rawState["lastUploadAt"] as? Date, lastAttemptAt: rawState["lastAttemptAt"] as? Date,
-                        lastError: rawState["lastError"] as? String, uploadedThrough: rawState["uploadedThrough"] as? Date)
-        basalProgram = rawState["basalProgram"] as? [Double]
-        history = Self.loadHistory() ?? PumpHistoryLog.newIdentity()
-        if let cookie = try? KeychainManager().getGenericPasswordForService(Self.sessionKeychainService) {
-            client = GlookoClient(region: Self.region, sessionCookie: cookie)
-        }
-    }
-
-    public var rawState: RawStateValue {
-        var state: RawStateValue = ["isOnboarded": isOnboarded]
-        state["email"] = email
-        state["lastUploadAt"] = status.lastUploadAt
-        state["lastAttemptAt"] = status.lastAttemptAt
-        state["lastError"] = status.lastError
-        state["uploadedThrough"] = status.uploadedThrough
-        state["basalProgram"] = basalProgram
-        return state
-    }
-
-    // MARK: Account
-
-    /// Signs in and verifies the account the session belongs to. Credentials are kept only in the Keychain.
-    public func signIn(email: String, password: String, historyStart: Date? = nil) async throws -> String {
-        let client = GlookoClient(region: Self.region)
-        try await client.signIn(email: email, password: password)
-        let identity = try await Self.accountEmail(client)
-        try KeychainManager().replaceGenericPassword(password, forService: Self.passwordKeychainService)
-        try KeychainManager().replaceGenericPassword(client.sessionCookie, forService: Self.sessionKeychainService)
-        try queue.sync {
-            // The start only applies to a history that has not been uploaded, so sent records never change.
-            if let historyStart, history.lastUploadedIndex == nil {
-                history = PumpHistoryLog.newIdentity()
-                history.historyStart = historyStart
-                try saveHistory()
-            }
-            self.email = identity
-            self.client = client
-            self.isOnboarded = true
-            self.status.lastError = nil
-        }
-        stateDelegate?.pluginDidUpdateState(self)
-        return identity
-    }
-
-    public func completeDelete() {
-        try? KeychainManager().replaceGenericPassword(nil as String?, forService: Self.passwordKeychainService)
-        try? KeychainManager().replaceGenericPassword(nil as String?, forService: Self.sessionKeychainService)
-        // Once anything is uploaded the history file is kept: re-adding the service continues the same virtual
-        // PDM instead of sending a second copy of the delivery under a new serial. Never-uploaded history is
-        // discarded, and Loop resends its retained doses to a re-added service.
-        if queue.sync(execute: { history.lastUploadedIndex == nil }) { try? FileManager.default.removeItem(at: Self.historyURL) }
-        stateDelegate?.pluginWantsDeletion(self)
-    }
-
-    static func accountEmail(_ client: GlookoClient) async throws -> String {
-        let result = try await client.get("/api/v2/users")
-        guard result.status == 200,
-              let object = try? JSONSerialization.jsonObject(with: result.body) as? [String: Any],
-              let users = object["users"] as? [[String: Any]], users.count == 1,
-              let email = users[0]["email"] as? String else { throw ServiceError.accountNotVerified(result.status) }
-        return email
-    }
-
-    // MARK: History
-
     public struct Summary {
         public var serial: UInt32
         public var historyStart: Date?
@@ -119,158 +25,408 @@ public final class GlookoService: Service {
         public var pendingDoses: Int
         public var committedThrough: Date?
         public var lateDoses: Int
+        public var conflictCount: Int
         public var hasUnuploadedRecords: Bool
+        public var sourceName: String?
+        public var canStartNewPeriod: Bool
+    }
+    public struct Snapshot {
+        public var email: String?
+        public var isOnboarded: Bool
+        public var status: Status
+        public var summary: Summary
     }
 
-    public var summary: Summary {
-        queue.sync {
-            Summary(serial: history.serial, historyStart: history.historyStart, records: history.records.count, pendingDoses: history.pending.count,
-                    committedThrough: history.committedThrough, lateDoses: history.lateDoses,
-                    hasUnuploadedRecords: history.hasUnuploadedRecords)
-        }
+    private let queue = DispatchQueue(label: "com.loopkit.GlookoService")
+    private let log = OSLog(subsystem: "com.loopkit.GlookoService", category: "GlookoService")
+    private let repository: HistoryRepository
+    private var account: GlookoAccount?
+    private var accountID: String?
+    private var storedEmail: String?
+    private var onboarded = false
+    private var currentStatus = Status()
+    private var history: PumpHistoryLog?
+    private var storageError: String?
+    private var contexts: [ReportingContext] = []
+    private var doseQueryDrained = false
+    private var settingsQueryDrained = false
+    private var deleted = false
+    private var lifecycle = UUID()
+    private var signInRequest: UUID?
+    private var uploadTask: Task<Void, Never>?
+    private var uploading = false
+    private var client: GlookoClient?
+    private var ownsLegacyCredentials = false
+    private let uploadInterval: TimeInterval = 15 * 60
+    public static let region = GlookoClient.Region(signInHosts: ["eu.api.glooko.com", "global.api.glooko.com"], dataHost: "eu.api.glooko.com")
+
+    private static var historyDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("GlookoService", isDirectory: true)
     }
 
-    /// Takes responsibility for doses: they are durable in the history file before Loop's cursor advances.
-    func ingest(created: [DoseEntry], deleted: [DoseEntry]) throws {
-        try queue.sync {
-            history.ingest(created: created.compactMap(\.sourceDose), deleted: deleted.compactMap(\.sourceDose))
-            history.commit(now: Date(), timeZone: .current)
-            try saveHistory()
-        }
-    }
+    public init() { repository = HistoryRepository(directory: Self.historyDirectory) }
 
-    func updateBasalProgram(_ schedule: BasalRateSchedule) {
-        var slots = [Double](repeating: 0, count: 48)
-        for slot in 0..<48 {
-            let offset = TimeInterval(slot * 1800)
-            slots[slot] = schedule.items.last(where: { $0.startTime <= offset })?.value ?? schedule.items.first?.value ?? 0
+    public init?(rawState: RawStateValue) {
+        repository = HistoryRepository(directory: Self.historyDirectory)
+        storedEmail = rawState["email"] as? String
+        accountID = rawState["accountID"] as? String
+        ownsLegacyCredentials = rawState["legacyCredentialsOwned"] as? Bool ?? (accountID == nil && storedEmail != nil)
+        onboarded = rawState["isOnboarded"] as? Bool ?? false
+        currentStatus.lastUploadAt = rawState["lastUploadAt"] as? Date
+        currentStatus.lastAttemptAt = rawState["lastAttemptAt"] as? Date
+        currentStatus.lastError = rawState["lastError"] as? String
+        if rawState["verificationVersion"] as? Int == 1 {
+            currentStatus.lastConfirmedAt = rawState["lastConfirmedAt"] as? Date
+            currentStatus.uploadedThrough = rawState["uploadedThrough"] as? Date
         }
-        let changed = queue.sync { () -> Bool in
-            guard basalProgram != slots else { return false }
-            basalProgram = slots
-            return true
+        if let data = rawState["reportingContexts"] as? Data {
+            do { contexts = try JSONDecoder().decode([ReportingContext].self, from: data) }
+            catch { currentStatus.lastError = "Could not restore pump settings. Waiting for a fresh settings snapshot." }
         }
-        if changed { stateDelegate?.pluginDidUpdateState(self) }
-    }
-
-    /// Uploads committed history when due. `force` ignores the spacing interval.
-    public func uploadIfNeeded(force: Bool = false) async {
-        let prepared: (data: Data, lastIndex: UInt32, through: Date?)? = queue.sync {
-            guard isOnboarded, !uploading, history.hasUnuploadedRecords else { return nil }
-            if !force, let last = status.lastAttemptAt, Date().timeIntervalSince(last) < uploadInterval { return nil }
+        if onboarded {
             do {
-                guard let file = try history.exportFile(timeZone: .current, basalProgram: basalProgram) else { return nil }
-                try saveHistory()
-                uploading = true
-                status.lastAttemptAt = Date()
-                return (file.data, file.lastIndex, history.committedThrough)
-            } catch {
-                status.lastError = "Could not build the upload: \(error)"
-                return nil
+                history = try repository.loadExisting(accountID: accountID, legacyEmail: storedEmail)
+                if accountID == nil { accountID = history?.ownerID }
+                if let data = history?.reportingContextData { contexts = try JSONDecoder().decode([ReportingContext].self, from: data) }
             }
+            catch { storageError = "Could not restore pump history: \(error)"; currentStatus.lastError = storageError }
         }
-        guard let prepared else { return }
-        var error: String?
-        do {
-            let result = try await post(prepared.data)
-            if (200..<300).contains(result.status) {
-                os_log("Uploaded %d bytes of pump history through index %d", log: log, type: .default, prepared.data.count, prepared.lastIndex)
-            } else {
-                error = "Glooko rejected the upload (HTTP \(result.status))"
-            }
-        } catch let failure {
-            error = String(describing: failure)
+        let service = accountID.map { Self.sessionService($0) } ?? Self.legacySessionService
+        let cookie = (try? KeychainManager().getGenericPasswordForService(service)) ??
+            (ownsLegacyCredentials ? try? KeychainManager().getGenericPasswordForService(Self.legacySessionService) : nil)
+        if let cookie {
+            client = GlookoClient(region: Self.region, sessionCookie: cookie)
         }
-        queue.sync {
-            uploading = false
-            status.lastError = error
-            if error == nil {
-                history.lastUploadedIndex = prepared.lastIndex
-                status.lastUploadAt = Date()
-                status.uploadedThrough = prepared.through
-                try? saveHistory()
-            }
-        }
-        if let error { os_log("Upload failed: %{public}@", log: log, type: .error, error) }
-        stateDelegate?.pluginDidUpdateState(self)
     }
 
-    /// Posts with the stored session, signing in again once if the session has expired.
-    private func post(_ data: Data) async throws -> GlookoClient.HTTPResult {
-        if let client = queue.sync(execute: { self.client }) {
-            let result = try await client.uploadDeviceFile(data, extractorName: "InsuletOmnipod")
-            if ![401, 403, 302].contains(result.status) { return result }
+    public var email: String? { queue.sync { storedEmail } }
+    public var isOnboarded: Bool { queue.sync { onboarded } }
+    public var status: Status { queue.sync { currentStatus } }
+    public var summary: Summary { snapshot.summary }
+    public var snapshot: Snapshot {
+        queue.sync {
+            Snapshot(email: storedEmail, isOnboarded: onboarded, status: currentStatus,
+                     summary: Summary(serial: history?.serial ?? 0, historyStart: history?.historyStart,
+                                      records: history?.records.count ?? 0,
+                                      pendingDoses: (history?.pending.count ?? 0) + (history?.unclassified.count ?? 0),
+                                      committedThrough: history?.committedThrough, lateDoses: history?.lateDoses ?? 0,
+                                      conflictCount: history?.conflicts.count ?? 0,
+                                      hasUnuploadedRecords: history?.hasUnuploadedRecords ?? false,
+                                      sourceName: contexts.last?.sourceName,
+                                      canStartNewPeriod: accountID != nil && contexts.last?.isRealPump == true && contexts.last?.settings != nil &&
+                                        (storageError != nil || history?.blockedReason(now: Date()) != nil ||
+                                         (history?.sourceID != nil && history?.sourceID != contexts.last?.sourceID))))
         }
-        guard let email = queue.sync(execute: { self.email }),
-              let password = try? KeychainManager().getGenericPasswordForService(Self.passwordKeychainService) else {
-            throw ServiceError.signInRequired
+    }
+
+    public var rawState: RawStateValue {
+        queue.sync {
+            var value: RawStateValue = ["isOnboarded": onboarded, "verificationVersion": 1]
+            value["email"] = storedEmail; value["accountID"] = accountID
+            value["legacyCredentialsOwned"] = ownsLegacyCredentials
+            value["lastUploadAt"] = currentStatus.lastUploadAt; value["lastAttemptAt"] = currentStatus.lastAttemptAt
+            value["lastError"] = currentStatus.lastError; value["uploadedThrough"] = currentStatus.uploadedThrough
+            value["lastConfirmedAt"] = currentStatus.lastConfirmedAt
+            value["reportingContexts"] = try? JSONEncoder().encode(contexts)
+            return value
+        }
+    }
+
+    private func changed() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stateDelegate?.pluginDidUpdateState(self)
+            NotificationCenter.default.post(name: Self.stateDidChange, object: self)
+        }
+    }
+
+    @discardableResult
+    public func signIn(email: String, password: String, historyStart: Date? = nil) async throws -> String {
+        let request = UUID()
+        let generation = try queue.sync { () throws -> UUID in
+            guard !deleted else { throw CancellationError() }
+            signInRequest = request
+            return lifecycle
         }
         let fresh = GlookoClient(region: Self.region)
         try await fresh.signIn(email: email, password: password)
-        guard try await Self.accountEmail(fresh).caseInsensitiveCompare(email) == .orderedSame else {
-            throw ServiceError.accountChanged
+        let verified = try await fresh.verifiedAccount(expectedEmail: email)
+        try Task.checkCancellation()
+        try queue.sync {
+            guard !deleted, lifecycle == generation, signInRequest == request else { throw CancellationError() }
+            if let accountID, accountID != verified.id { throw HistoryRepository.Failure.accountMismatch }
+            if accountID == nil, onboarded, storedEmail?.caseInsensitiveCompare(verified.email) != .orderedSame {
+                throw HistoryRepository.Failure.accountMismatch
+            }
+            if let storageError { throw ServiceError.blocked(storageError) }
+            var owned = try repository.bind(verified, legacyEmail: onboarded ? storedEmail : nil)
+            if let data = owned.reportingContextData { contexts = try JSONDecoder().decode([ReportingContext].self, from: data) }
+            if owned.records.isEmpty && owned.pending.isEmpty && owned.unclassified.isEmpty { owned.historyStart = historyStart ?? Date() }
+            try repository.save(owned)
+            try KeychainManager().replaceGenericPassword(password, forService: Self.passwordService(verified.id))
+            try KeychainManager().replaceGenericPassword(fresh.sessionCookie, forService: Self.sessionService(verified.id))
+            removeOwnedLegacyCredentials()
+            history = owned; account = verified; accountID = verified.id; storedEmail = verified.email
+            client = fresh; onboarded = true; signInRequest = nil; currentStatus.lastError = nil
         }
-        try? KeychainManager().replaceGenericPassword(fresh.sessionCookie, forService: Self.sessionKeychainService)
-        queue.sync { self.client = fresh }
-        return try await fresh.uploadDeviceFile(data, extractorName: "InsuletOmnipod")
+        changed()
+        return verified.email
     }
 
-    private static var historyURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("GlookoService", isDirectory: true).appendingPathComponent("pump-history.json")
+    public func cancelSignIn() { queue.sync { signInRequest = nil } }
+
+    public func completeDelete() {
+        let keys = queue.sync { () -> (String, String, Bool) in
+            deleted = true; onboarded = false; lifecycle = UUID(); signInRequest = nil
+            uploadTask?.cancel(); uploadTask = nil; uploading = false; client = nil
+            return (accountID.map(Self.passwordService) ?? Self.legacyPasswordService,
+                    accountID.map(Self.sessionService) ?? Self.legacySessionService, ownsLegacyCredentials)
+        }
+        do {
+            try KeychainManager().deleteGenericPassword(forService: keys.0)
+            try KeychainManager().deleteGenericPassword(forService: keys.1)
+            if keys.2 {
+                try KeychainManager().deleteGenericPassword(forService: Self.legacyPasswordService)
+                try KeychainManager().deleteGenericPassword(forService: Self.legacySessionService)
+            }
+        } catch { os_log("Could not remove Glooko credentials", log: log, type: .error) }
+        // Every patient's history, including unconfirmed work, remains partitioned on disk for reconnection.
+        stateDelegate?.pluginWantsDeletion(self)
+        changed()
     }
 
-    private static func loadHistory() -> PumpHistoryLog? {
-        guard let data = try? Data(contentsOf: historyURL) else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(PumpHistoryLog.self, from: data)
+    /// An explicit recovery action archives unresolved history; it never rewrites submitted PDM indices.
+    public func startNewReportingPeriod() throws {
+        try queue.sync {
+            guard !deleted, let accountID, let context = contexts.last, let source = context.sourceID,
+                  context.settings != nil else { throw ServiceError.blocked("Connect a real pump and wait for its settings first") }
+            if let history { try repository.archive(history) }
+            else { try repository.archiveUnreadable(accountID: accountID) }
+            var fresh = PumpHistoryLog.newIdentity()
+            fresh.ownerID = accountID; fresh.ownerEmail = storedEmail; fresh.sourceID = source; fresh.historyStart = Date()
+            fresh.reportingContextData = try JSONEncoder().encode(contexts)
+            try repository.save(fresh)
+            uploadTask?.cancel(); uploadTask = nil; uploading = false; lifecycle = UUID()
+            history = fresh; storageError = nil; currentStatus = Status()
+        }
+        changed()
     }
 
-    private func saveHistory() throws {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let url = Self.historyURL
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try encoder.encode(history).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    private func check(_ generation: UUID) throws {
+        try Task.checkCancellation()
+        try queue.sync {
+            guard !deleted, onboarded, lifecycle == generation else { throw CancellationError() }
+        }
     }
 
-    private static let passwordKeychainService = "GlookoServicePassword"
-    private static let sessionKeychainService = "GlookoServiceSession"
+    /// Account identity is verified before every submission, including after restoring a stored cookie.
+    private func authenticatedClient(_ generation: UUID, renew: Bool = false) async throws -> GlookoClient {
+        try check(generation)
+        let saved = queue.sync { (client, accountID, storedEmail, ownsLegacyCredentials) }
+        guard let email = saved.2 else { throw ServiceError.signInRequired }
+        var fresh = saved.0
+        var verified: GlookoAccount?
+        if !renew, let existing = fresh {
+            do { verified = try await existing.verifiedAccount(expectedID: saved.1, expectedEmail: saved.1 == nil ? email : nil) }
+            catch GlookoError.authenticationRequired { fresh = nil }
+            catch GlookoError.notSignedIn { fresh = nil }
+        } else { fresh = nil }
+        if fresh == nil {
+            let service = saved.1.map(Self.passwordService) ?? Self.legacyPasswordService
+            let password = (try? KeychainManager().getGenericPasswordForService(service)) ??
+                (saved.3 ? try? KeychainManager().getGenericPasswordForService(Self.legacyPasswordService) : nil)
+            guard let password else { throw ServiceError.signInRequired }
+            let replacement = GlookoClient(region: Self.region)
+            try await replacement.signIn(email: email, password: password)
+            verified = try await replacement.verifiedAccount(expectedID: saved.1, expectedEmail: saved.1 == nil ? email : nil)
+            fresh = replacement
+        }
+        guard let fresh, let verified else { throw ServiceError.signInRequired }
+        try check(generation)
+        try queue.sync {
+            guard lifecycle == generation, !deleted else { throw CancellationError() }
+            if accountID == nil || ownsLegacyCredentials {
+                guard storageError == nil, history != nil else { throw ServiceError.blocked(storageError ?? "History is unavailable") }
+                let migrated = try repository.bind(verified, legacyEmail: storedEmail)
+                if (try? KeychainManager().getGenericPasswordForService(Self.passwordService(verified.id))) == nil,
+                   let password = try? KeychainManager().getGenericPasswordForService(Self.legacyPasswordService) {
+                    try KeychainManager().replaceGenericPassword(password, forService: Self.passwordService(verified.id))
+                }
+                history = migrated; accountID = verified.id
+            }
+            try KeychainManager().replaceGenericPassword(fresh.sessionCookie, forService: Self.sessionService(verified.id))
+            removeOwnedLegacyCredentials()
+            account = verified; storedEmail = verified.email; client = fresh
+        }
+        return fresh
+    }
+
+    /// Called on the state queue after scoped credentials have been saved. Keep the retry flag on failure.
+    private func removeOwnedLegacyCredentials() {
+        guard ownsLegacyCredentials else { return }
+        do {
+            try KeychainManager().deleteGenericPassword(forService: Self.legacyPasswordService)
+            try KeychainManager().deleteGenericPassword(forService: Self.legacySessionService)
+            ownsLegacyCredentials = false
+        } catch { os_log("Legacy credential cleanup will be retried", log: log, type: .error) }
+    }
+
+    public func uploadIfNeeded(force: Bool = false) async {
+        let task = queue.sync { () -> Task<Void, Never>? in
+            guard onboarded, !deleted, !uploading else { return nil }
+            if !force, let last = currentStatus.lastAttemptAt, Date().timeIntervalSince(last) < uploadInterval { return nil }
+            uploading = true
+            let generation = lifecycle
+            let task = Task { [weak self] in
+                guard let self else { return }
+                await self.performUpload(force: force, generation: generation)
+            }
+            uploadTask = task
+            return task
+        }
+        await task?.value
+    }
+
+    private func performUpload(force: Bool, generation: UUID) async {
+        defer {
+            queue.sync { if lifecycle == generation { uploading = false; uploadTask = nil } }
+            changed()
+        }
+        do {
+            try check(generation)
+            try queue.sync {
+                guard storageError == nil else { throw ServiceError.blocked(storageError!) }
+                guard doseQueryDrained, settingsQueryDrained else { throw ServiceError.blocked("Waiting for Loop to finish reading source history and settings") }
+                guard let context = contexts.last, context.isRealPump else { throw ServiceError.blocked("Uploads are paused while a real pump source is unavailable") }
+                guard context.settings != nil else { throw ServiceError.blocked(context.problem ?? "Waiting for complete Loop settings") }
+                guard var owned = history else { throw HistoryRepository.Failure.missingHistory }
+                if owned.sourceID == nil { owned.sourceID = context.sourceID }
+                guard owned.sourceID == context.sourceID else { throw ServiceError.blocked("The connected pump has changed. Review the source before starting a new reporting period.") }
+                let captured = contexts
+                owned.classifyStaged { dose in
+                    let source = captured.last(where: { $0.date <= dose.start }) ?? captured.first
+                    if captured.contains(where: { $0.date > dose.start && $0.date < dose.end && $0.sourceID != source?.sourceID }) {
+                        return "unverified-pump-source" // A dose spanning a source change needs review, not guessed attribution.
+                    }
+                    return source?.sourceID ?? (source == nil ? nil : "unverified-pump-source")
+                }
+                owned.commit(now: Date(), timeZone: context.timeZone)
+                try repository.save(owned)
+                history = owned
+                currentStatus.lastError = nil
+                if let reason = owned.blockedReason(now: Date()) { throw ServiceError.blocked(reason) }
+            }
+            guard queue.sync(execute: { history?.hasUnuploadedRecords == true }) else { return }
+            var transport = try await authenticatedClient(generation)
+            try check(generation)
+            let prepared = try queue.sync { () throws -> (Data, UInt32, IngestionManifest)? in
+                guard lifecycle == generation, !deleted, doseQueryDrained, settingsQueryDrained,
+                      let context = contexts.last, context.sourceID == history?.sourceID,
+                      let settings = context.settings, var owned = history else { throw CancellationError() }
+                guard let file = try owned.exportFile(timeZone: context.timeZone, settings: settings) else { return nil }
+                let manifest = IngestionManifest(serial: owned.serial, events: owned.exportedEvents,
+                                                 timeZone: context.timeZone, committedThrough: owned.committedThrough)
+                owned.lastSubmittedIndex = file.lastIndex
+                try repository.save(owned)
+                history = owned; currentStatus.lastAttemptAt = Date()
+                return (file.data, file.lastIndex, manifest)
+            }
+            guard let prepared else { return }
+            try check(generation)
+            var result = try await transport.uploadDeviceFile(prepared.0, extractorName: "InsuletOmnipod")
+            if Self.sessionExpiredStatuses.contains(result.status) {
+                transport = try await authenticatedClient(generation, renew: true)
+                try check(generation)
+                result = try await transport.uploadDeviceFile(prepared.0, extractorName: "InsuletOmnipod")
+            }
+            try check(generation)
+            guard (200..<300).contains(result.status), result.contentType?.lowercased().contains("text/html") != true else {
+                throw ServiceError.blocked("Glooko rejected the submission (HTTP \(result.status)); history is retained")
+            }
+            queue.sync {
+                if lifecycle == generation { currentStatus.lastUploadAt = Date(); currentStatus.verificationDetail = "Submitted; checking Glooko records" }
+            }
+            changed()
+            let verification = try await transport.verifyIngestion(prepared.2)
+            try check(generation)
+            try queue.sync {
+                guard lifecycle == generation, !deleted, var owned = history else { throw CancellationError() }
+                currentStatus.verificationDetail = verification.detail
+                currentStatus.lastError = owned.blockedReason(now: Date())
+                if verification.confirmed {
+                    owned.lastUploadedIndex = prepared.1
+                    try repository.save(owned)
+                    history = owned; currentStatus.lastConfirmedAt = Date(); currentStatus.uploadedThrough = verification.confirmedThrough
+                }
+            }
+        } catch is CancellationError { }
+        catch {
+            queue.sync { if lifecycle == generation && !deleted { currentStatus.lastError = String(describing: error) } }
+        }
+    }
+
+    private static let sessionExpiredStatuses: Set<Int> = [301, 302, 303, 307, 308, 401, 403, 421]
+    private static let legacyPasswordService = "GlookoServicePassword"
+    private static let legacySessionService = "GlookoServiceSession"
+    private static func passwordService(_ id: String) -> String { "GlookoService.\(GlookoAccount(id: id, email: "").storageKey).Password" }
+    private static func sessionService(_ id: String) -> String { "GlookoService.\(GlookoAccount(id: id, email: "").storageKey).Session" }
 
     public enum ServiceError: Error, CustomStringConvertible {
-        case accountNotVerified(Int), signInRequired, accountChanged
+        case signInRequired, blocked(String)
         public var description: String {
-            switch self {
-            case .accountNotVerified(let status): return "Could not confirm the Glooko account (HTTP \(status))"
-            case .signInRequired: return "Sign in to Glooko again"
-            case .accountChanged: return "The Glooko session belongs to a different account; sign in again"
-            }
+            switch self { case .signInRequired: return "Sign in to Glooko again"; case let .blocked(reason): return reason }
         }
     }
 }
 
 extension GlookoService: RemoteDataService {
-    public var doseDataLimit: Int? { 1000 }
+    // Loop follows each changed query with an empty callback. Commit only after that drain boundary.
+    public var doseDataLimit: Int? { nil }
 
     public func uploadDoseData(created: [DoseEntry], deleted: [DoseEntry], completion: @escaping (Result<Bool, Error>) -> Void) {
         do {
-            try ingest(created: created, deleted: deleted)
+            try queue.sync {
+                guard !self.deleted, var owned = history else { throw ServiceError.blocked(storageError ?? "Sign in before storing pump history") }
+                owned.stage(created: created.compactMap(\.sourceDose), deleted: deleted.compactMap(\.sourceDose))
+                try repository.save(owned)
+                history = owned
+                doseQueryDrained = created.isEmpty && deleted.isEmpty
+            }
             completion(.success(true))
+            changed()
+            if created.isEmpty && deleted.isEmpty { Task { await uploadIfNeeded() } }
         } catch {
-            os_log("Could not store doses: %{public}@", log: log, type: .error, String(describing: error))
-            completion(.failure(error))
-            return
+            queue.sync { currentStatus.lastError = "Could not store source history: \(error)" }
+            changed(); completion(.failure(error))
         }
-        Task { await uploadIfNeeded() }
     }
 
     public func uploadSettingsData(_ stored: [StoredSettings], completion: @escaping (Result<Bool, Error>) -> Void) {
-        if let schedule = stored.last?.basalRateSchedule { updateBasalProgram(schedule) }
-        completion(.success(true))
+        do {
+            try queue.sync {
+                guard !deleted else { throw CancellationError() }
+                var updated = contexts
+                for settings in stored.sorted(by: { $0.date < $1.date }) {
+                    let context = ReportingContext(settings)
+                    if updated.last.map({ context.date >= $0.date && !context.hasSameConfiguration(as: $0) }) ?? true { updated.append(context) }
+                }
+                guard var owned = history else {
+                    contexts = updated // Retain live context so recovery can archive the failed file explicitly.
+                    throw HistoryRepository.Failure.missingHistory
+                }
+                owned.reportingContextData = try JSONEncoder().encode(updated)
+                try repository.save(owned)
+                history = owned; contexts = updated; settingsQueryDrained = stored.isEmpty
+            }
+            changed(); completion(.success(true))
+            if stored.isEmpty { Task { await uploadIfNeeded() } }
+        } catch {
+            queue.sync { currentStatus.lastError = "Could not store source settings: \(error)" }
+            changed(); completion(.failure(error))
+        }
     }
 
-    // Glucose reaches Glooko through Dexcom; the other streams have no verified Glooko pump-file record.
     public func uploadAlertData(_ stored: [SyncAlertObject], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
     public func uploadCarbData(created: [SyncCarbObject], updated: [SyncCarbObject], deleted: [SyncCarbObject], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
     public func uploadTemporaryOverrideData(updated: [TemporaryScheduleOverride], deleted: [TemporaryScheduleOverride], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
@@ -279,27 +435,4 @@ extension GlookoService: RemoteDataService {
     public func uploadPumpEventData(_ stored: [PersistedPumpEvent], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
     public func uploadCgmEventData(_ stored: [PersistedCgmEvent], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
     public func remoteNotificationWasReceived(_ notification: [String: AnyObject]) async throws {}
-}
-
-extension DoseEntry {
-    /// Pump-delivered doses only: manually entered (pen) doses are not PDM history.
-    var sourceDose: SourceDose? {
-        guard !manuallyEntered else { return nil }
-        let id = syncIdentifier ?? "\(type.rawValue)-\(startDate.timeIntervalSince1970)"
-        switch type {
-        case .basal:
-            return SourceDose(id: id, kind: .basal, start: startDate, end: endDate, rate: unitsPerHour,
-                              automatic: automatic, isMutable: isMutable)
-        case .tempBasal:
-            return SourceDose(id: id, kind: .tempBasal, start: startDate, end: endDate, rate: unitsPerHour,
-                              automatic: automatic, isMutable: isMutable)
-        case .suspend:
-            return SourceDose(id: id, kind: .suspend, start: startDate, end: endDate, isMutable: isMutable)
-        case .resume:
-            return nil
-        case .bolus:
-            return SourceDose(id: id, kind: .bolus, start: startDate, end: endDate, programmed: programmedUnits,
-                              delivered: deliveredUnits, automatic: automatic, isMutable: isMutable)
-        }
-    }
 }

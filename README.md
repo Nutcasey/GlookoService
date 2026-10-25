@@ -1,50 +1,59 @@
 # GlookoService: Loop → Glooko pump history
 
-A reporting-only Loop service plugin. It sends Loop's reconciled insulin delivery (scheduled basal, temporary basal, suspensions, boluses) to a Glooko account as an Insulet Omnipod (Eros) PDM download. Glooko then shows the basal and bolus records and generates its own daily totals and report statistics. It never doses, changes settings or acts on remote commands.
+A reporting-only Loop service. It sends reconciled pump delivery to a Glooko account as a **virtual Omnipod Eros reporting device**. It never doses, changes Loop therapy or acts on remote commands.
 
 ## How it works
 
-- `uploadDoseData` maps each pump `DoseEntry` to a `SourceDose` (manually entered pen doses are skipped) and stores it in a durable virtual-PDM history (`PumpHistoryLog`, in Application Support) **before** acknowledging, so Loop's cursor never advances past unsaved doses.
-- History is committed only once settled: older than one hour, not past the newest reported basal (Loop's overlay inserts scheduled basal only between later doses), and before any dose Loop still marks mutable. Committed records keep their PDM indices forever.
-- At most every 15 minutes it posts the whole history (14-day window) as an IBF file to `POST https://eu.api.glooko.com/api/v3/device/file/upload?extractorName=InsuletOmnipod` with the patient session. Glooko de-duplicates repeated records; the running basal is flagged in progress and finalised on a later upload.
-- Sign-in uses the Glooko e-mail and password (Keychain). The session is renewed automatically, and the account e-mail is re-verified before each re-sign-in.
+- Loop's created/deleted doses are durably staged before the source callback succeeds. Commitment waits for the dose and settings queries to finish; a page boundary is not a complete clinical snapshot.
+- History settles for one hour and stops before unresolved mutable doses or a bolus whose end has not settled. Manual **Upload now** also commits everything ready at that boundary.
+- Actual basal delivered volume is retained separately from programmed rate. The encoder uses adjacent native hundredth-unit rates where necessary to preserve volume, rather than rounding away insulin. Genuine gaps are suspensions. Temporary rates cannot expire before the next actual boundary.
+- The account is verified before each submission. History and Keychain credentials are partitioned by the patient GUID. Reconnecting the same account resumes its identity and indices; another account receives its own history.
+- An upgrade migrates the original history without changing its serial or record indices and retains a legacy backup. Read/decode errors pause uploads instead of creating an empty replacement.
+- Settings come from Loop's saved therapy configuration, including basal programme, carb ratios, sensitivity, target range, safety threshold, maximum doses and insulin action duration. Missing settings block submission. The IBF envelope retains the accepted Eros hardware descriptors for the virtual reporting device; these do not describe the attached pump's hardware.
+- Stored pump context identifies the selected real source. Simulator/unknown sources, source changes and intervals spanning source changes pause reporting for review. A timestamp alone does not authorise a source.
+- At most every 15 minutes the file is submitted to `POST https://eu.api.glooko.com/api/v3/device/file/upload?extractorName=InsuletOmnipod`. Authentication redirects are not followed. Session recovery includes HTTP 421 and verifies the patient again.
+- **Submission and confirmation are separate.** A source-specific readback checks each eligible final basal, suspension and bolus record, including its quantity/duration. Missing/incomplete readback leaves the file pending. Running intervals are not claimed as confirmed coverage.
+- Unconfirmed records are never pruned. Confirmed history is retained for at least 14 days, with its delivery anchor. Indices remain stable across retries and relaunches.
 
-## Layout
+## Corrections and recovery
 
-Same shape as LoopKit's own services (NightscoutService, TidepoolService):
+Before any possible submission, backfilled, changed or deleted doses can rebuild the local history safely. Once indices may have reached Glooko, this integration has no verified remote amendment/deletion contract. Those changes are retained as explicit conflicts and uploads pause; they are never silently acknowledged as corrected. Late-dose counts use distinct source identities.
+
+The status screen updates as work progresses and shows last submission, last confirmation, confirmed coverage and conflicts. An old mutable marker remains visible with a recovery explanation instead of disappearing or silently holding the queue forever.
+
+Reconnect to the pump to resolve provisional data first. If a source change or unresolved old history requires a new period, the explicit **Start a new reporting period** action archives the old history and begins from now. It does not amend existing Glooko records. Removing the service stops/cancels its work and removes its credentials; account-scoped history remains for reconnection.
+
+## Layout and build
 
 | Path | Contents |
 |---|---|
-| `GlookoKit/` | LoopKit-free core: Glooko client, IBF encoder, durable history log. Also a Swift package (`swift test`) |
-| `GlookoServiceKit/` | `GlookoService`: Loop `Service` and `RemoteDataService`, dose mapping, uploads |
-| `GlookoServiceKitUI/` | Sign-in and status screens (`ServiceUI`) |
-| `GlookoServiceKitPlugin/` | `.loopplugin` principal class and the Info.plist keys Loop discovers |
-| `Tests/GlookoKitTests/` | Encoder golden files and history-log replays |
+| `GlookoKit/` | LoopKit-free client, production IBF writer, durable history/repository and readback verifier |
+| `GlookoServiceKit/` | Loop service, source/settings context and dose adapter |
+| `GlookoServiceKitUI/` | Cancellable sign-in and live status/recovery screens |
+| `GlookoServiceKitPlugin/` | Plugin principal class and discovery metadata |
+| `Tests/GlookoKitTests/` | Production-file decoder regressions, history/recovery, account migration and accepted synthetic golden files |
 
-## Add to LoopWorkspace
+The core builds/tests on macOS with `swift test`. The iOS plugin builds inside LoopWorkspace:
 
-1. Add this repository to your LoopWorkspace checkout, e.g. `git submodule add <url> GlookoService`.
-2. In `LoopWorkspace.xcworkspace/contents.xcworkspacedata`, add a `FileRef` to `GlookoService/GlookoService.xcodeproj`.
-3. In the `LoopWorkspace` scheme, add a build entry for the `GlookoServiceKitPlugin` target.
-4. Build and install Loop as usual. Loop's `copy-plugins.sh` embeds the plugin and its two frameworks.
+1. Add this repository to LoopWorkspace, for example as a submodule named `GlookoService`.
+2. Add `GlookoService/GlookoService.xcodeproj` to the workspace.
+3. Add `GlookoServiceKitPlugin` to the workspace scheme's build action.
+4. Build/install Loop normally. Loop's `copy-plugins.sh` embeds the plugin and its frameworks.
 
-After adding source files, run `xcodegen generate` and commit the regenerated project.
+After adding source files, run `xcodegen generate` and include the regenerated project with the change.
 
-## Use
+## Verification and limits
 
-Loop → Settings → Services → Add Service → **Glooko** → sign in. The status screen shows the last upload, how far history is committed, the virtual PDM serial and any doses that arrived too late to include.
+The repair was exercised with offline history replays, two four-day simulations with interrupted/automatic boluses, suspensions, replacements, resends, persistence and simulated failures, and an independent IBF decoder. All checked complete-day basal/bolus totals matched. Twelve package tests pass.
 
-## Verified (isolated test account, synthetic data)
+A revised synthetic file was accepted in the isolated test account and **all 18 eligible final clinical records passed the production readback verifier**. The supplied nondefault maximum doses, insulin duration, carb ratio and sensitivity were also read back from Glooko settings. This establishes the tested file contract; it does not prove every real pump history or clinic report.
 
-- Detailed records and Glooko's own daily summaries match the source for every complete day, across incremental uploads, simulated failures, resent and replaced doses, interrupted and automatic boluses, suspensions and an uncovered pod gap. Summaries match to Glooko's 0.05 U rounding.
-- Overall statistics (`basalUnitsPerDay`, `bolusUnitsPerDay`, `totalPumpInsulinPerDay`) are populated and correct.
+Remaining format/product limits:
 
-## Known limitations
-
-- Automatic boluses and automatic temp basals show as ordinary boluses and temp basals; the Eros format has no automation flag. Totals are unaffected.
-- A bolus's programmed amount is not kept when it was interrupted; the delivered amount is correct.
-- On the two clock-change days, the daily summary is correct but the detailed rows are off by about half a unit, because Glooko keys them by wall-clock time (as with a real PDM).
-- Carbs and CGM are not sent. Glucose already reaches Glooko from Dexcom.
-- A dose Loop reports more than an hour late cannot be added to committed history; it is counted on the status screen.
-- The current day's summary appears once the day is complete and its last record final.
-- EU region only.
+- Automatic boluses/temps appear as ordinary boluses/temps.
+- Interrupted boluses retain delivered volume but not their original programmed amount in Glooko's decoded records.
+- The previously observed detailed-row discrepancy on clock-change days remains; daily-summary parity was observed in the earlier fixtures. Travel/time-zone reconstruction is limited by source context.
+- Carbs and CGM are not uploaded. CGM requires its separate connection, such as Dexcom.
+- Bolus amounts use the format's hundredth-unit precision; therapy profiles use the native profile precision.
+- Two-factor sign-in and regions outside the EU are unsupported.
+- Submitted clinical corrections remain reviewable conflicts until a supported amendment contract is established or the user explicitly archives the period.

@@ -24,6 +24,6 @@ final class PumpHistoryLogTests: XCTestCase {
         XCTAssertEqual(log.records.first?.date, start)
         XCTAssertTrue(log.records.allSatisfy { $0.date >= start })
         XCTAssertTrue(log.records.contains { $0.record == .bolus(delivered: 5.85, immediateSeconds: 234) })
-        XCTAssertNotNil(try log.exportFile(timeZone: zone))
+        XCTAssertNotNil(try log.exportFile(timeZone: zone, settings: fixtureSettings()))
     }
 }
