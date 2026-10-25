@@ -1,0 +1,77 @@
+# Regenerate after adding files: xcodegen generate (commit the resulting GlookoService.xcodeproj).
+# Built from LoopWorkspace; LoopKit and LoopKitUI come from the workspace's built products.
+name: GlookoService
+options:
+  bundleIdPrefix: com.loopkit
+  deploymentTarget:
+    iOS: "15.1"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+    SKIP_INSTALL: YES
+    SUPPORTS_MACCATALYST: NO
+    DEFINES_MODULE: YES
+    LD_RUNPATH_SEARCH_PATHS: ["$(inherited)", "@executable_path/Frameworks", "@loader_path/Frameworks"]
+targets:
+  GlookoServiceKit:
+    type: framework
+    platform: iOS
+    sources:
+      - path: GlookoKit
+      - path: GlookoServiceKit
+    dependencies:
+      - framework: LoopKit.framework
+        embed: false
+        implicit: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.loopkit.GlookoServiceKit
+        GENERATE_INFOPLIST_FILE: YES
+  GlookoServiceKitUI:
+    type: framework
+    platform: iOS
+    sources:
+      - path: GlookoServiceKitUI
+    dependencies:
+      - target: GlookoServiceKit
+        embed: false
+      - framework: LoopKit.framework
+        embed: false
+        implicit: true
+      - framework: LoopKitUI.framework
+        embed: false
+        implicit: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.loopkit.GlookoServiceKitUI
+        GENERATE_INFOPLIST_FILE: YES
+  GlookoServiceKitPlugin:
+    type: framework
+    platform: iOS
+    sources:
+      - path: GlookoServiceKitPlugin
+    dependencies:
+      # Embedded in the plugin's Frameworks folder; Loop's copy-plugins.sh moves them into the app.
+      - target: GlookoServiceKit
+        embed: true
+        codeSign: false
+      - target: GlookoServiceKitUI
+        embed: true
+        codeSign: false
+      - framework: LoopKit.framework
+        embed: false
+        implicit: true
+      - framework: LoopKitUI.framework
+        embed: false
+        implicit: true
+    settings:
+      base:
+        WRAPPER_EXTENSION: loopplugin
+        PRODUCT_NAME: GlookoServiceKitPlugin
+        PRODUCT_BUNDLE_IDENTIFIER: com.loopkit.GlookoServiceKitPlugin
+        INFOPLIST_FILE: GlookoServiceKitPlugin/Info.plist
+        GENERATE_INFOPLIST_FILE: NO

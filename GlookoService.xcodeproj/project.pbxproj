@@ -1,0 +1,680 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1C0BA1DA4F4AC3A99E3901BA /* GlookoService+UI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 431FFF85D52B938076630689 /* GlookoService+UI.swift */; };
+		28851B99E22188A090AD9F43 /* GlookoClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14943A645E8F9C3DCF61AF41 /* GlookoClient.swift */; };
+		2B1E76D521A3389F2D1E89C6 /* GlookoServiceKitUI.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 3D8D18557ABE513F0AD1488F /* GlookoServiceKitUI.framework */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		2D6666BB0E9119C82F427A62 /* SyncReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 342A3C5C150C1AE866DA2DB2 /* SyncReader.swift */; };
+		2FDB8D3383D38E57BEAA8959 /* LoopKitUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 79EB4DAB821E6034482C9839 /* LoopKitUI.framework */; };
+		36143A0B7E8F6FDF9DDF5685 /* DeviceFileUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6C12599142AA47FE8DDB88F /* DeviceFileUpload.swift */; };
+		39EAF01A55A983063B9E2697 /* GlookoService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78EA70D967D00898EE0E0577 /* GlookoService.swift */; };
+		845BA7DE7BF9130C727E4EE2 /* GlookoServiceKitUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D8D18557ABE513F0AD1488F /* GlookoServiceKitUI.framework */; };
+		8B34916823BA59C46AAD68BB /* GlookoServiceKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D0F3BDEDB49D12884F88E08 /* GlookoServiceKit.framework */; };
+		AEB7F20C0BF0953E7FA8EC97 /* GlookoServiceKit.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 3D0F3BDEDB49D12884F88E08 /* GlookoServiceKit.framework */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		B3C7DF4811B4583694E0DCA4 /* SyntheticIBF.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0F5F1B720C9BD1133A087B7 /* SyntheticIBF.swift */; };
+		B5548BDAE8F6037318F18372 /* GlookoServiceKitPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF2ECD0DFF0D8CFC155B885C /* GlookoServiceKitPlugin.swift */; };
+		B640E4795B21F015134E4296 /* Records.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA8AC0BCA3CB800D9AD3C81 /* Records.swift */; };
+		C9B628A9C4B5B7159C4BC953 /* PumpHistoryLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96C9531BA7197B9BEA854487 /* PumpHistoryLog.swift */; };
+		D5ABF0F9C06A7465FC8165E5 /* LoopKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4B7525F927564C2D84B0BCBA /* LoopKit.framework */; };
+		D68D68B81D456B7923772C2F /* PumpHistoryIBF.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66DD61AC3ADCCB2555C03457 /* PumpHistoryIBF.swift */; };
+		DAF27687AC509DE775E95E00 /* GlookoServiceKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D0F3BDEDB49D12884F88E08 /* GlookoServiceKit.framework */; };
+		DB7960C82E3BD2176D88669B /* LoopKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4B7525F927564C2D84B0BCBA /* LoopKit.framework */; };
+		DE0EAA8CDC9A622A76767AAD /* LoopKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4B7525F927564C2D84B0BCBA /* LoopKit.framework */; };
+		E7F0BDBAFB8A997455C96723 /* LoopKitUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 79EB4DAB821E6034482C9839 /* LoopKitUI.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		7AD010F21A2FE64446A390F2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CFA0DF41CA67B9C75ABF1E49 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 62CC3EE823F1C43D5FBD499D;
+			remoteInfo = GlookoServiceKit;
+		};
+		C28C47D0304F84B0B04D65A5 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CFA0DF41CA67B9C75ABF1E49 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C5F7DDCCEA00F0C98C4C0542;
+			remoteInfo = GlookoServiceKitUI;
+		};
+		DCBD975BC8C43BE864824D5D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CFA0DF41CA67B9C75ABF1E49 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 62CC3EE823F1C43D5FBD499D;
+			remoteInfo = GlookoServiceKit;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		0AAFF95D8DD436A5235BDD0A /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				AEB7F20C0BF0953E7FA8EC97 /* GlookoServiceKit.framework in Embed Frameworks */,
+				2B1E76D521A3389F2D1E89C6 /* GlookoServiceKitUI.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		01EBBB7B752B023254CD0BD6 /* GlookoServiceKitPlugin.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = GlookoServiceKitPlugin.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		14943A645E8F9C3DCF61AF41 /* GlookoClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlookoClient.swift; sourceTree = "<group>"; };
+		342A3C5C150C1AE866DA2DB2 /* SyncReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncReader.swift; sourceTree = "<group>"; };
+		3D0F3BDEDB49D12884F88E08 /* GlookoServiceKit.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = GlookoServiceKit.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		3D8D18557ABE513F0AD1488F /* GlookoServiceKitUI.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = GlookoServiceKitUI.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		431FFF85D52B938076630689 /* GlookoService+UI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GlookoService+UI.swift"; sourceTree = "<group>"; };
+		4B7525F927564C2D84B0BCBA /* LoopKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = LoopKit.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		639B0CBF747B0355A2F27CAA /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		66DD61AC3ADCCB2555C03457 /* PumpHistoryIBF.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PumpHistoryIBF.swift; sourceTree = "<group>"; };
+		6DA8AC0BCA3CB800D9AD3C81 /* Records.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Records.swift; sourceTree = "<group>"; };
+		78EA70D967D00898EE0E0577 /* GlookoService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlookoService.swift; sourceTree = "<group>"; };
+		79EB4DAB821E6034482C9839 /* LoopKitUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = LoopKitUI.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		96C9531BA7197B9BEA854487 /* PumpHistoryLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PumpHistoryLog.swift; sourceTree = "<group>"; };
+		A0F5F1B720C9BD1133A087B7 /* SyntheticIBF.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticIBF.swift; sourceTree = "<group>"; };
+		BF2ECD0DFF0D8CFC155B885C /* GlookoServiceKitPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlookoServiceKitPlugin.swift; sourceTree = "<group>"; };
+		E6C12599142AA47FE8DDB88F /* DeviceFileUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceFileUpload.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A6193FC62332288AAE0844AE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8B34916823BA59C46AAD68BB /* GlookoServiceKit.framework in Frameworks */,
+				DB7960C82E3BD2176D88669B /* LoopKit.framework in Frameworks */,
+				2FDB8D3383D38E57BEAA8959 /* LoopKitUI.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A96A992E925F89B0F20D85A6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DAF27687AC509DE775E95E00 /* GlookoServiceKit.framework in Frameworks */,
+				845BA7DE7BF9130C727E4EE2 /* GlookoServiceKitUI.framework in Frameworks */,
+				DE0EAA8CDC9A622A76767AAD /* LoopKit.framework in Frameworks */,
+				E7F0BDBAFB8A997455C96723 /* LoopKitUI.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C904E9C7E6E3E779B48C1187 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D5ABF0F9C06A7465FC8165E5 /* LoopKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0A5D45147B9896983770DE0B /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				3D0F3BDEDB49D12884F88E08 /* GlookoServiceKit.framework */,
+				01EBBB7B752B023254CD0BD6 /* GlookoServiceKitPlugin.framework */,
+				3D8D18557ABE513F0AD1488F /* GlookoServiceKitUI.framework */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		126DD1CDDA37498B0F5712CC /* GlookoKit */ = {
+			isa = PBXGroup;
+			children = (
+				E6C12599142AA47FE8DDB88F /* DeviceFileUpload.swift */,
+				14943A645E8F9C3DCF61AF41 /* GlookoClient.swift */,
+				66DD61AC3ADCCB2555C03457 /* PumpHistoryIBF.swift */,
+				96C9531BA7197B9BEA854487 /* PumpHistoryLog.swift */,
+				6DA8AC0BCA3CB800D9AD3C81 /* Records.swift */,
+				342A3C5C150C1AE866DA2DB2 /* SyncReader.swift */,
+				A0F5F1B720C9BD1133A087B7 /* SyntheticIBF.swift */,
+			);
+			path = GlookoKit;
+			sourceTree = "<group>";
+		};
+		2B0843FCBD1D6699BE0CAC0C /* GlookoServiceKit */ = {
+			isa = PBXGroup;
+			children = (
+				78EA70D967D00898EE0E0577 /* GlookoService.swift */,
+			);
+			path = GlookoServiceKit;
+			sourceTree = "<group>";
+		};
+		916A9C1DD22F648CF67CFC95 /* GlookoServiceKitPlugin */ = {
+			isa = PBXGroup;
+			children = (
+				BF2ECD0DFF0D8CFC155B885C /* GlookoServiceKitPlugin.swift */,
+				639B0CBF747B0355A2F27CAA /* Info.plist */,
+			);
+			path = GlookoServiceKitPlugin;
+			sourceTree = "<group>";
+		};
+		B42D45BA12D205C018B8D223 /* GlookoServiceKitUI */ = {
+			isa = PBXGroup;
+			children = (
+				431FFF85D52B938076630689 /* GlookoService+UI.swift */,
+			);
+			path = GlookoServiceKitUI;
+			sourceTree = "<group>";
+		};
+		D1FC1B3C76508F49F3EBD350 = {
+			isa = PBXGroup;
+			children = (
+				126DD1CDDA37498B0F5712CC /* GlookoKit */,
+				2B0843FCBD1D6699BE0CAC0C /* GlookoServiceKit */,
+				916A9C1DD22F648CF67CFC95 /* GlookoServiceKitPlugin */,
+				B42D45BA12D205C018B8D223 /* GlookoServiceKitUI */,
+				E363D8A5089E878F7DC010C2 /* Frameworks */,
+				0A5D45147B9896983770DE0B /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E363D8A5089E878F7DC010C2 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				4B7525F927564C2D84B0BCBA /* LoopKit.framework */,
+				79EB4DAB821E6034482C9839 /* LoopKitUI.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		0B09CAA91AE6F898645417CB /* GlookoServiceKitPlugin */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9217BEE6B7347AC2A7615450 /* Build configuration list for PBXNativeTarget "GlookoServiceKitPlugin" */;
+			buildPhases = (
+				FB1B5750F7893EFA2795ADDD /* Sources */,
+				A96A992E925F89B0F20D85A6 /* Frameworks */,
+				0AAFF95D8DD436A5235BDD0A /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				436DEA29C664ABE68C4AE08A /* PBXTargetDependency */,
+				818E0339117B45F42AD64299 /* PBXTargetDependency */,
+			);
+			name = GlookoServiceKitPlugin;
+			packageProductDependencies = (
+			);
+			productName = GlookoServiceKitPlugin;
+			productReference = 01EBBB7B752B023254CD0BD6 /* GlookoServiceKitPlugin.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		62CC3EE823F1C43D5FBD499D /* GlookoServiceKit */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 69A038EF43AD4032378F634F /* Build configuration list for PBXNativeTarget "GlookoServiceKit" */;
+			buildPhases = (
+				DAB4402B8DB6A0788A67E33A /* Sources */,
+				C904E9C7E6E3E779B48C1187 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = GlookoServiceKit;
+			packageProductDependencies = (
+			);
+			productName = GlookoServiceKit;
+			productReference = 3D0F3BDEDB49D12884F88E08 /* GlookoServiceKit.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		C5F7DDCCEA00F0C98C4C0542 /* GlookoServiceKitUI */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E98E2A43890B60821DC83DFA /* Build configuration list for PBXNativeTarget "GlookoServiceKitUI" */;
+			buildPhases = (
+				069037FC1071C12EE9393671 /* Sources */,
+				A6193FC62332288AAE0844AE /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				29B1BDCCAAC19607CCD73C26 /* PBXTargetDependency */,
+			);
+			name = GlookoServiceKitUI;
+			packageProductDependencies = (
+			);
+			productName = GlookoServiceKitUI;
+			productReference = 3D8D18557ABE513F0AD1488F /* GlookoServiceKitUI.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		CFA0DF41CA67B9C75ABF1E49 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					0B09CAA91AE6F898645417CB = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+					62CC3EE823F1C43D5FBD499D = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+					C5F7DDCCEA00F0C98C4C0542 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = ADF80A190AEFAE7D86FE7D2C /* Build configuration list for PBXProject "GlookoService" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = D1FC1B3C76508F49F3EBD350;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 0A5D45147B9896983770DE0B /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				62CC3EE823F1C43D5FBD499D /* GlookoServiceKit */,
+				C5F7DDCCEA00F0C98C4C0542 /* GlookoServiceKitUI */,
+				0B09CAA91AE6F898645417CB /* GlookoServiceKitPlugin */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		069037FC1071C12EE9393671 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1C0BA1DA4F4AC3A99E3901BA /* GlookoService+UI.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DAB4402B8DB6A0788A67E33A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				36143A0B7E8F6FDF9DDF5685 /* DeviceFileUpload.swift in Sources */,
+				28851B99E22188A090AD9F43 /* GlookoClient.swift in Sources */,
+				39EAF01A55A983063B9E2697 /* GlookoService.swift in Sources */,
+				D68D68B81D456B7923772C2F /* PumpHistoryIBF.swift in Sources */,
+				C9B628A9C4B5B7159C4BC953 /* PumpHistoryLog.swift in Sources */,
+				B640E4795B21F015134E4296 /* Records.swift in Sources */,
+				2D6666BB0E9119C82F427A62 /* SyncReader.swift in Sources */,
+				B3C7DF4811B4583694E0DCA4 /* SyntheticIBF.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FB1B5750F7893EFA2795ADDD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B5548BDAE8F6037318F18372 /* GlookoServiceKitPlugin.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		29B1BDCCAAC19607CCD73C26 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 62CC3EE823F1C43D5FBD499D /* GlookoServiceKit */;
+			targetProxy = DCBD975BC8C43BE864824D5D /* PBXContainerItemProxy */;
+		};
+		436DEA29C664ABE68C4AE08A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 62CC3EE823F1C43D5FBD499D /* GlookoServiceKit */;
+			targetProxy = 7AD010F21A2FE64446A390F2 /* PBXContainerItemProxy */;
+		};
+		818E0339117B45F42AD64299 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C5F7DDCCEA00F0C98C4C0542 /* GlookoServiceKitUI */;
+			targetProxy = C28C47D0304F84B0B04D65A5 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		051298620EF9981DDC58348A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		1979AAF79881B10D5923E978 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		3A024EDC5EC807BCAE58E1C9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.loopkit.GlookoServiceKit;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Release;
+		};
+		558A028CA6AFF59B7D9315A9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = GlookoServiceKitPlugin/Info.plist;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.loopkit.GlookoServiceKitPlugin;
+				PRODUCT_NAME = GlookoServiceKitPlugin;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+				WRAPPER_EXTENSION = loopplugin;
+			};
+			name = Debug;
+		};
+		991589B82CF111C995A9C693 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = GlookoServiceKitPlugin/Info.plist;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.loopkit.GlookoServiceKitPlugin;
+				PRODUCT_NAME = GlookoServiceKitPlugin;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+				WRAPPER_EXTENSION = loopplugin;
+			};
+			name = Release;
+		};
+		A9CACF8EE943278C5D99EAB1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.loopkit.GlookoServiceKitUI;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Release;
+		};
+		BCE31D74EA9FB78CEF581B10 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.loopkit.GlookoServiceKitUI;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Debug;
+		};
+		DD0F85D383527DBD5588E620 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.loopkit.GlookoServiceKit;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		69A038EF43AD4032378F634F /* Build configuration list for PBXNativeTarget "GlookoServiceKit" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DD0F85D383527DBD5588E620 /* Debug */,
+				3A024EDC5EC807BCAE58E1C9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9217BEE6B7347AC2A7615450 /* Build configuration list for PBXNativeTarget "GlookoServiceKitPlugin" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				558A028CA6AFF59B7D9315A9 /* Debug */,
+				991589B82CF111C995A9C693 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		ADF80A190AEFAE7D86FE7D2C /* Build configuration list for PBXProject "GlookoService" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				051298620EF9981DDC58348A /* Debug */,
+				1979AAF79881B10D5923E978 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E98E2A43890B60821DC83DFA /* Build configuration list for PBXNativeTarget "GlookoServiceKitUI" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BCE31D74EA9FB78CEF581B10 /* Debug */,
+				A9CACF8EE943278C5D99EAB1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = CFA0DF41CA67B9C75ABF1E49 /* Project object */;
+}
