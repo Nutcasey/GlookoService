@@ -185,7 +185,7 @@ private final class RefuseRedirects: NSObject, URLSessionTaskDelegate, @unchecke
 
 public enum GlookoError: Error, CustomStringConvertible {
     case signInFailed([String]), twoFactorRequired, notSignedIn, badURL(String), invalidResource, invalidResponse
-    case authenticationRequired(Int)
+    case authenticationRequired(Int), requestRejected(String)
     public var description: String {
         switch self {
         case .signInFailed(let f): return "Sign-in failed:\n  " + f.joined(separator: "\n  ")
@@ -195,6 +195,7 @@ public enum GlookoError: Error, CustomStringConvertible {
         case .invalidResource: return "Invalid Glooko resource name"
         case .invalidResponse: return "Glooko returned an unexpected response"
         case .authenticationRequired: return "The Glooko session has expired; sign in again"
+        case .requestRejected(let reason): return reason
         }
     }
 }

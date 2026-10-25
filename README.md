@@ -9,6 +9,7 @@ A reporting-only Loop service. It sends reconciled pump delivery to a Glooko acc
 - Actual basal delivered volume is retained separately from programmed rate. The encoder uses adjacent native hundredth-unit rates where necessary to preserve volume, rather than rounding away insulin. Genuine gaps are suspensions. Temporary rates cannot expire before the next actual boundary.
 - The account is verified before each submission. History and Keychain credentials are partitioned by the patient GUID. Reconnecting the same account resumes its identity and indices; another account receives its own history.
 - An upgrade migrates the original history without changing its serial or record indices and retains a legacy backup. Read/decode errors pause uploads instead of creating an empty replacement.
+- Carbs entered in Loop are sent soon after saving as standalone Glooko foods (listed as "Food"), outside the pump file. Each Loop entry keeps fixed Glooko IDs, so edits update and deletions remove the same entry, and each is confirmed by reading it back.
 - Settings come from Loop's saved therapy configuration, including basal programme, carb ratios, sensitivity, target range, safety threshold, maximum doses and insulin action duration. Missing settings block submission. The IBF envelope retains the accepted Eros hardware descriptors for the virtual reporting device; these do not describe the attached pump's hardware.
 - Stored pump context identifies the selected real source. Simulator/unknown sources, source changes and intervals spanning source changes pause reporting for review. A timestamp alone does not authorise a source.
 - At most every 15 minutes the file is submitted to `POST https://eu.api.glooko.com/api/v3/device/file/upload?extractorName=InsuletOmnipod`. Authentication redirects are not followed. Session recovery includes HTTP 421 and verifies the patient again.
@@ -53,7 +54,7 @@ Remaining format/product limits:
 - Automatic boluses/temps appear as ordinary boluses/temps.
 - Interrupted boluses retain delivered volume but not their original programmed amount in Glooko's decoded records.
 - The previously observed detailed-row discrepancy on clock-change days remains; daily-summary parity was observed in the earlier fixtures. Travel/time-zone reconstruction is limited by source context.
-- Carbs and CGM are not uploaded. CGM requires its separate connection, such as Dexcom.
+- CGM is not uploaded; it requires its separate connection, such as Dexcom.
 - Bolus amounts use the format's hundredth-unit precision; therapy profiles use the native profile precision.
 - Two-factor sign-in and regions outside the EU are unsupported.
 - Submitted clinical corrections remain reviewable conflicts until a supported amendment contract is established or the user explicitly archives the period.
