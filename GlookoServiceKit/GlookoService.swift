@@ -17,6 +17,8 @@ public final class GlookoService: Service {
         public var uploadedThrough: Date?
         public var lastConfirmedAt: Date?
         public var verificationDetail: String?
+        public var lastCarbConfirmedAt: Date?
+        public var carbDetail: String?
     }
     public struct Summary {
         public var serial: UInt32
@@ -29,6 +31,7 @@ public final class GlookoService: Service {
         public var hasUnuploadedRecords: Bool
         public var sourceName: String?
         public var canStartNewPeriod: Bool
+        public var pendingCarbs: Int
     }
     public struct Snapshot {
         public var email: String?
@@ -57,6 +60,9 @@ public final class GlookoService: Service {
     private var uploading = false
     private var client: GlookoClient?
     private var ownsLegacyCredentials = false
+    private var carbs: CarbOutbox?
+    private var carbsSending = false
+    private var carbAnchorReset = false
     private let uploadInterval: TimeInterval = 15 * 60
     public static let region = GlookoClient.Region(signInHosts: ["eu.api.glooko.com", "global.api.glooko.com"], dataHost: "eu.api.glooko.com")
 
@@ -76,6 +82,8 @@ public final class GlookoService: Service {
         currentStatus.lastUploadAt = rawState["lastUploadAt"] as? Date
         currentStatus.lastAttemptAt = rawState["lastAttemptAt"] as? Date
         currentStatus.lastError = rawState["lastError"] as? String
+        currentStatus.lastCarbConfirmedAt = rawState["lastCarbConfirmedAt"] as? Date
+        carbAnchorReset = rawState["carbAnchorReset"] as? Bool ?? false
         if rawState["verificationVersion"] as? Int == 1 {
             currentStatus.lastConfirmedAt = rawState["lastConfirmedAt"] as? Date
             currentStatus.uploadedThrough = rawState["uploadedThrough"] as? Date
@@ -91,6 +99,12 @@ public final class GlookoService: Service {
                 if let data = history?.reportingContextData { contexts = try JSONDecoder().decode([ReportingContext].self, from: data) }
             }
             catch { storageError = "Could not restore pump history: \(error)"; currentStatus.lastError = storageError }
+        }
+        if let accountID { carbs = Self.loadCarbs(accountID) }
+        if onboarded && !carbAnchorReset {
+            // Earlier versions acknowledged carbs without sending them; let Loop resend its retained entries once.
+            Self.resetLoopCarbAnchor()
+            carbAnchorReset = true
         }
         let service = accountID.map { Self.sessionService($0) } ?? Self.legacySessionService
         let cookie = (try? KeychainManager().getGenericPasswordForService(service)) ??
@@ -116,7 +130,8 @@ public final class GlookoService: Service {
                                       sourceName: contexts.last?.sourceName,
                                       canStartNewPeriod: accountID != nil && contexts.last?.isRealPump == true && contexts.last?.settings != nil &&
                                         (storageError != nil || history?.blockedReason(now: Date()) != nil ||
-                                         (history?.sourceID != nil && history?.sourceID != contexts.last?.sourceID))))
+                                         (history?.sourceID != nil && history?.sourceID != contexts.last?.sourceID)),
+                                      pendingCarbs: carbs?.due.count ?? 0))
         }
     }
 
@@ -128,6 +143,8 @@ public final class GlookoService: Service {
             value["lastUploadAt"] = currentStatus.lastUploadAt; value["lastAttemptAt"] = currentStatus.lastAttemptAt
             value["lastError"] = currentStatus.lastError; value["uploadedThrough"] = currentStatus.uploadedThrough
             value["lastConfirmedAt"] = currentStatus.lastConfirmedAt
+            value["lastCarbConfirmedAt"] = currentStatus.lastCarbConfirmedAt
+            value["carbAnchorReset"] = carbAnchorReset
             value["reportingContexts"] = try? JSONEncoder().encode(contexts)
             return value
         }
@@ -168,6 +185,8 @@ public final class GlookoService: Service {
             try KeychainManager().replaceGenericPassword(fresh.sessionCookie, forService: Self.sessionService(verified.id))
             removeOwnedLegacyCredentials()
             history = owned; account = verified; accountID = verified.id; storedEmail = verified.email
+            if carbs == nil { carbs = Self.loadCarbs(verified.id) }
+            carbAnchorReset = true
             client = fresh; onboarded = true; signInRequest = nil; currentStatus.lastError = nil
         }
         changed()
@@ -254,6 +273,7 @@ public final class GlookoService: Service {
                     try KeychainManager().replaceGenericPassword(password, forService: Self.passwordService(verified.id))
                 }
                 history = migrated; accountID = verified.id
+                if carbs == nil { carbs = Self.loadCarbs(verified.id) }
             }
             try KeychainManager().replaceGenericPassword(fresh.sessionCookie, forService: Self.sessionService(verified.id))
             removeOwnedLegacyCredentials()
@@ -366,6 +386,72 @@ public final class GlookoService: Service {
         }
     }
 
+    // MARK: Carbs
+
+    /// Carbs use Glooko's meal/food upserts, independent of the pump file: they are sent as soon as Loop reports them.
+    private func sendCarbs() async {
+        let start = queue.sync { () -> (UUID, [SourceCarb], Set<String>)? in
+            guard onboarded, !deleted, !carbsSending, accountID != nil, var outbox = carbs, !outbox.due.isEmpty else { return nil }
+            let due = outbox.due
+            outbox.markSubmitted(due)
+            do { try saveCarbs(outbox) } catch { currentStatus.carbDetail = "Could not save carbs: \(error)"; return nil }
+            carbs = outbox; carbsSending = true
+            return (lifecycle, due, outbox.retiringMeals)
+        }
+        guard let (generation, due, retiring) = start else { return }
+        defer { queue.sync { carbsSending = false }; changed() }
+        let timeZone = queue.sync { contexts.last?.timeZone ?? .current }
+        do {
+            var transport = try await authenticatedClient(generation)
+            let result: (confirmed: [SourceCarb], detail: String)
+            do { result = try await transport.submitCarbs(due, retiringMeals: retiring, timeZone: timeZone) }
+            catch GlookoError.authenticationRequired {
+                transport = try await authenticatedClient(generation, renew: true)
+                result = try await transport.submitCarbs(due, retiringMeals: retiring, timeZone: timeZone)
+            }
+            try check(generation)
+            queue.sync {
+                guard var outbox = carbs else { return }
+                for carb in result.confirmed { outbox.confirm(carb) }
+                try? saveCarbs(outbox)
+                carbs = outbox
+                currentStatus.carbDetail = result.detail
+                if !result.confirmed.isEmpty { currentStatus.lastCarbConfirmedAt = Date() }
+            }
+        } catch is CancellationError {
+        } catch {
+            queue.sync { if lifecycle == generation { currentStatus.carbDetail = "Carbs not sent yet: \(error)" } }
+        }
+    }
+
+    private static func carbsURL(_ accountID: String) -> URL {
+        historyDirectory.appendingPathComponent(GlookoAccount(id: accountID, email: "").storageKey, isDirectory: true)
+            .appendingPathComponent("carbs.json")
+    }
+
+    private static func loadCarbs(_ accountID: String) -> CarbOutbox? {
+        guard let data = try? Data(contentsOf: carbsURL(accountID)) else { return nil }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        var outbox = try? decoder.decode(CarbOutbox.self, from: data)
+        outbox?.migrateToStandaloneFoods()
+        return outbox
+    }
+
+    /// Called on the state queue.
+    private func saveCarbs(_ outbox: CarbOutbox) throws {
+        guard let accountID else { throw ServiceError.signInRequired }
+        let url = Self.carbsURL(accountID)
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try encoder.encode(outbox).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    /// Loop keeps each service's carb query position in its app-group defaults (RemoteDataServicesManager).
+    private static func resetLoopCarbAnchor() {
+        guard let suite = Bundle.main.object(forInfoDictionaryKey: "AppGroupIdentifier") as? String else { return }
+        UserDefaults(suiteName: suite)?.removeObject(forKey: "com.loopkit.Loop.RemoteDataServicesManager.\(pluginIdentifier).CarbQueryAnchor")
+    }
+
     private static let sessionExpiredStatuses: Set<Int> = [301, 302, 303, 307, 308, 401, 403, 421]
     private static let legacyPasswordService = "GlookoServicePassword"
     private static let legacySessionService = "GlookoServiceSession"
@@ -395,7 +481,7 @@ extension GlookoService: RemoteDataService {
             }
             completion(.success(true))
             changed()
-            if created.isEmpty && deleted.isEmpty { Task { await uploadIfNeeded() } }
+            if created.isEmpty && deleted.isEmpty { Task { await uploadIfNeeded(); await sendCarbs() } }
         } catch {
             queue.sync { currentStatus.lastError = "Could not store source history: \(error)" }
             changed(); completion(.failure(error))
@@ -428,7 +514,28 @@ extension GlookoService: RemoteDataService {
     }
 
     public func uploadAlertData(_ stored: [SyncAlertObject], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
-    public func uploadCarbData(created: [SyncCarbObject], updated: [SyncCarbObject], deleted: [SyncCarbObject], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
+    public func uploadCarbData(created: [SyncCarbObject], updated: [SyncCarbObject], deleted: [SyncCarbObject], completion: @escaping (Result<Bool, Error>) -> Void) {
+        do {
+            try queue.sync {
+                guard !self.deleted, accountID != nil else { throw ServiceError.blocked("Sign in before storing carbs") }
+                var outbox = carbs ?? CarbOutbox(historyStart: history?.historyStart)
+                // Entries Glooko itself wrote to Health would come back as duplicates.
+                let source = (created + updated + deleted).filter { !$0.provenanceIdentifier.lowercased().contains("glooko") }
+                outbox.stage(source.map { carb in
+                    SourceCarb(id: carb.syncIdentifier ?? carb.uuid?.uuidString ?? "carb-\(carb.startDate.timeIntervalSince1970)",
+                               start: carb.startDate, grams: carb.grams, version: carb.syncVersion ?? 0, deleted: carb.operation == .delete)
+                })
+                try saveCarbs(outbox)
+                carbs = outbox
+            }
+            completion(.success(true))
+            changed()
+            Task { await sendCarbs() }
+        } catch {
+            queue.sync { currentStatus.carbDetail = "Could not store carbs: \(error)" }
+            changed(); completion(.failure(error))
+        }
+    }
     public func uploadTemporaryOverrideData(updated: [TemporaryScheduleOverride], deleted: [TemporaryScheduleOverride], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
     public func uploadDosingDecisionData(_ stored: [StoredDosingDecision], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
     public func uploadGlucoseData(_ stored: [StoredGlucoseSample], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }

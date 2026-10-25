@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0B9B224BBF92691C7DC6D2F6 /* CarbOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FCD333294FAD9B1CB5B9757 /* CarbOutbox.swift */; };
 		1C0BA1DA4F4AC3A99E3901BA /* GlookoService+UI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 431FFF85D52B938076630689 /* GlookoService+UI.swift */; };
 		28851B99E22188A090AD9F43 /* GlookoClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14943A645E8F9C3DCF61AF41 /* GlookoClient.swift */; };
 		2B1E76D521A3389F2D1E89C6 /* GlookoServiceKitUI.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 3D8D18557ABE513F0AD1488F /* GlookoServiceKitUI.framework */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -79,6 +80,7 @@
 		342A3C5C150C1AE866DA2DB2 /* SyncReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncReader.swift; sourceTree = "<group>"; };
 		3D0F3BDEDB49D12884F88E08 /* GlookoServiceKit.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = GlookoServiceKit.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		3D8D18557ABE513F0AD1488F /* GlookoServiceKitUI.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = GlookoServiceKitUI.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		3FCD333294FAD9B1CB5B9757 /* CarbOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarbOutbox.swift; sourceTree = "<group>"; };
 		40A083E7040223D4642A6705 /* ReportingContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReportingContext.swift; sourceTree = "<group>"; };
 		431FFF85D52B938076630689 /* GlookoService+UI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GlookoService+UI.swift"; sourceTree = "<group>"; };
 		4B7525F927564C2D84B0BCBA /* LoopKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = LoopKit.framework; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -141,6 +143,7 @@
 		126DD1CDDA37498B0F5712CC /* GlookoKit */ = {
 			isa = PBXGroup;
 			children = (
+				3FCD333294FAD9B1CB5B9757 /* CarbOutbox.swift */,
 				E6C12599142AA47FE8DDB88F /* DeviceFileUpload.swift */,
 				14943A645E8F9C3DCF61AF41 /* GlookoClient.swift */,
 				E0A61A29622C7D2B0AE2FABC /* HistoryRepository.swift */,
@@ -320,6 +323,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0B9B224BBF92691C7DC6D2F6 /* CarbOutbox.swift in Sources */,
 				36143A0B7E8F6FDF9DDF5685 /* DeviceFileUpload.swift in Sources */,
 				28851B99E22188A090AD9F43 /* GlookoClient.swift in Sources */,
 				39EAF01A55A983063B9E2697 /* GlookoService.swift in Sources */,

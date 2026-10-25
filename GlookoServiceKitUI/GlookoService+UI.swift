@@ -213,6 +213,11 @@ struct StatusView: View {
                 Button(model.uploading ? "Uploading…" : "Upload now") { model.uploadNow() }
                     .disabled(model.uploading).accessibilityIdentifier("glooko-upload-now")
             }
+            Section(header: Text("Carbs"), footer: Text("Carbs entered in Loop are sent as Glooko food entries soon after you save them. Edits and deletions update the same entry.")) {
+                row("Last confirmed", text(model.snapshot.status.lastCarbConfirmedAt))
+                row("Waiting to send", String(model.snapshot.summary.pendingCarbs))
+                if let detail = model.snapshot.status.carbDetail { Text(detail).foregroundColor(.secondary) }
+            }
             Section(header: Text("History")) {
                 row("History from", text(model.snapshot.summary.historyStart))
                 row("PDM serial", String(model.snapshot.summary.serial))
