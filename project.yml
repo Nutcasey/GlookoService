@@ -17,6 +17,41 @@ settings:
     DEFINES_MODULE: YES
     LD_RUNPATH_SEARCH_PATHS: ["$(inherited)", "@executable_path/Frameworks", "@loader_path/Frameworks"]
 targets:
+  GlookoServiceTestHost:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.6"
+    sources:
+      - path: Tests/GlookoServiceKitTests/Host
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.loopkit.GlookoServiceTestHost
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: Tests/GlookoServiceKitTests/Host/Host.entitlements
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+  GlookoServiceKitTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.6"
+    sources:
+      - path: Tests/GlookoServiceKitTests
+        excludes: [Host]
+    dependencies:
+      - target: GlookoServiceTestHost
+      - target: GlookoServiceKit
+        embed: true
+        codeSign: false
+      - framework: LoopKit.framework
+        embed: true
+        codeSign: false
+        implicit: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.loopkit.GlookoServiceKitTests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/GlookoServiceTestHost.app/GlookoServiceTestHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
   GlookoServiceKit:
     type: framework
     platform: iOS
@@ -36,6 +71,14 @@ targets:
     platform: iOS
     sources:
       - path: GlookoServiceKitUI
+    postBuildScripts:
+      - name: Capture Glooko build
+        script: /bin/sh "${SRCROOT}/Scripts/capture-build-details.sh"
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(SRCROOT)/Scripts/capture-build-details.sh
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/GlookoBuild.plist
     dependencies:
       - target: GlookoServiceKit
         embed: false
@@ -75,3 +118,13 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.loopkit.GlookoServiceKitPlugin
         INFOPLIST_FILE: GlookoServiceKitPlugin/Info.plist
         GENERATE_INFOPLIST_FILE: NO
+schemes:
+  GlookoServiceTests:
+    build:
+      targets:
+        GlookoServiceKit: all
+        GlookoServiceKitTests: [test]
+    test:
+      targets:
+        - name: GlookoServiceKitTests
+          parallelizable: false

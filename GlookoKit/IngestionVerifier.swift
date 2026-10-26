@@ -32,12 +32,16 @@ public struct IngestionManifest: Sendable {
         if let lastDelivery, case .deactivate = lastDelivery.record { through = committedThrough }
         else { through = lastDelivery?.date ?? committedThrough }
         var expected: [Expected] = []
+        var followingDelivery: [Int: IBFHistoryEvent] = [:]
+        var nextDelivery: IBFHistoryEvent?
+        for i in events.indices.reversed() {
+            followingDelivery[i] = nextDelivery
+            switch events[i].record { case .basal, .suspend, .deactivate: nextDelivery = events[i]; default: break }
+        }
         for (i, event) in events.enumerated() where !event.inProgress {
             let zone = event.utcOffset.flatMap(TimeZone.init(secondsFromGMT:)) ?? timeZone
             let timestamp = WallClock(timeZone: zone).string(Date(timeIntervalSince1970: floor(event.date.timeIntervalSince1970)))
-            let next = events.dropFirst(i + 1).first { later in
-                switch later.record { case .basal, .suspend, .deactivate: return true; default: return false }
-            }
+            let next = followingDelivery[i]
             switch event.record {
             case let .bolus(units, _):
                 expected.append(.init(index: event.index, resource: "normal_boluses", timestamp: timestamp,
@@ -74,20 +78,43 @@ public struct IngestionManifest: Sendable {
             return .init(confirmed: false, matchedRecords: 0, missingRecords: 0, confirmedThrough: nil,
                          detail: "Waiting for the first final clinical record")
         }
+        let fractional = ISO8601DateFormatter(); fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let whole = ISO8601DateFormatter()
+        func timestamp(_ value: String) -> Double? {
+            (fractional.date(from: value) ?? whole.date(from: value))?.timeIntervalSince1970
+        }
+        struct Candidate {
+            var guid: String
+            var time: Double
+            var row: [String: Any]
+        }
+        var indexed: [String: [Int64: [Candidate]]] = [:]
+        for (resource, records) in rows {
+            for row in records {
+                guard let guid = row["guid"] as? String, !guid.isEmpty,
+                      let owner = row["pumpGuid"] as? String, owner.caseInsensitiveCompare(pump) == .orderedSame,
+                      (row["softDeleted"] as? Bool) == false,
+                      let text = row["pumpTimestamp"] as? String, let time = timestamp(text) else { continue }
+                indexed[resource, default: [:]][Int64((time * 1000).rounded()), default: []]
+                    .append(Candidate(guid: guid, time: time, row: row))
+            }
+        }
         var used = Set<String>()
         var matched = 0
         for expected in records {
-            let match = rows[expected.resource, default: []].first { row in
-                guard let guid = row["guid"] as? String, !guid.isEmpty, !used.contains(guid),
-                      let owner = row["pumpGuid"] as? String, owner.caseInsensitiveCompare(pump) == .orderedSame,
-                      (row["softDeleted"] as? Bool) == false,
-                      let timestamp = row["pumpTimestamp"] as? String, Self.sameSecond(timestamp, expected.timestamp) else { return false }
+            guard let time = timestamp(expected.timestamp) else { continue }
+            let key = Int64((time * 1000).rounded())
+            // Adjacent buckets preserve the original sub-millisecond tolerance at rounding boundaries.
+            let candidates = (-1...1).flatMap { indexed[expected.resource]?[key + Int64($0)] ?? [] }
+            let match = candidates.first { candidate in
+                guard !used.contains(candidate.guid), abs(candidate.time - time) < 0.001 else { return false }
+                let row = candidate.row
                 if let duration = expected.duration, (row["duration"] as? NSNumber)?.intValue != duration { return false }
                 if let rate = expected.rate, abs(((row["rate"] as? NSNumber)?.doubleValue ?? -.infinity) - rate) > 0.00001 { return false }
                 if let units = expected.units, abs(((row["insulinDelivered"] as? NSNumber)?.doubleValue ?? -.infinity) - units) > 0.00001 { return false }
                 return true
             }
-            if let guid = match?["guid"] as? String { used.insert(guid); matched += 1 }
+            if let match { used.insert(match.guid); matched += 1 }
         }
         let missing = records.count - matched
         return .init(confirmed: missing == 0, matchedRecords: matched, missingRecords: missing,
@@ -95,14 +122,6 @@ public struct IngestionManifest: Sendable {
                      detail: missing == 0 ? "Final records verified in Glooko" : "Waiting for Glooko to finalise \(missing) clinical record(s)")
     }
 
-    private static func sameSecond(_ lhs: String, _ rhs: String) -> Bool {
-        func date(_ value: String) -> Date? {
-            let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            return f.date(from: value) ?? ISO8601DateFormatter().date(from: value)
-        }
-        guard let a = date(lhs), let b = date(rhs) else { return false }
-        return abs(a.timeIntervalSince(b)) < 0.001
-    }
 }
 
 public extension GlookoClient {

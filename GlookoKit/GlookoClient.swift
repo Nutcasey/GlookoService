@@ -51,6 +51,7 @@ public final class GlookoClient: @unchecked Sendable {
         public var body: Data
         public var setCookies: [HTTPCookie]
         public var contentType: String? = nil
+        public var serverDate: Date? = nil
         public var text: String { String(decoding: body, as: UTF8.self) }
     }
 
@@ -132,8 +133,12 @@ public final class GlookoClient: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse else { throw GlookoError.invalidResponse }
         let fields = http.allHeaderFields.reduce(into: [String: String]()) { $0["\($1.key)"] = "\($1.value)" }
         let cookies = HTTPCookie.cookies(withResponseHeaderFields: fields, for: url)
+        let clock = DateFormatter()
+        clock.locale = Locale(identifier: "en_US_POSIX"); clock.timeZone = TimeZone(secondsFromGMT: 0)
+        clock.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
         return HTTPResult(status: http.statusCode, body: data, setCookies: cookies,
-                          contentType: http.value(forHTTPHeaderField: "Content-Type"))
+                          contentType: http.value(forHTTPHeaderField: "Content-Type"),
+                          serverDate: http.value(forHTTPHeaderField: "Date").flatMap(clock.date(from:)))
     }
 
     static func resourceKey(_ resource: String) throws -> String {

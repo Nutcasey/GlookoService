@@ -37,7 +37,7 @@ public struct HistoryConflict: Codable, Equatable, Sendable {
 
 /// Durable responsibility for source doses, immutable submitted indices and explicit source conflicts.
 public struct PumpHistoryLog: Codable, Equatable, Sendable {
-    public var schemaVersion = 2
+    public var schemaVersion = 3
     public var ownerID: String?
     public var ownerEmail: String?
     public var sourceID: String?
@@ -60,7 +60,12 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
     private var legacyIDs: Set<String> = []
     private var legacyLateDoses = 0
     /// Submission intent is persisted before the request, including ambiguous network failures.
-    public var lastSubmittedIndex: UInt32?
+    public var lastSubmittedIndex: UInt32? {
+        didSet { submittedThrough = nil; submittedState = nil; submittedIDs = nil }
+    }
+    private var submittedThrough: Date?
+    private var submittedState: DeliveryTimeline.State?
+    private var submittedIDs: Set<String>?
     /// Highest submitted file whose eligible final clinical records have passed readback verification.
     public var lastUploadedIndex: UInt32?
     public var historyStart: Date?
@@ -111,10 +116,12 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
 
     /// Replays are deduplicated by identity and clinical content. Unsupported remote mutations remain durable.
     public mutating func ingest(created: [SourceDose], deleted: [SourceDose] = []) {
+        captureSubmissionCheckpoint()
         for dose in deleted {
             if committed[dose.id] != nil {
-                if lastSubmittedIndex == nil {
+                if !wasSubmitted(dose.id) {
                     sourceDoses[dose.id] = nil
+                    conflicts[dose.id] = nil
                     rebuildUnsubmitted()
                 } else {
                     conflicts[dose.id] = .init(original: sourceDoses[dose.id], replacement: nil, deletion: true,
@@ -136,9 +143,24 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
                                            reason: "The source dose has invalid quantities or dates")
                 continue
             }
+            if committed[dose.id] != nil, !wasSubmitted(dose.id), let boundary = submissionBoundary, dose.start < boundary {
+                conflicts[dose.id] = .init(original: sourceDoses[dose.id], replacement: dose, deletion: false,
+                                           reason: "A dose moved into an already submitted period")
+                continue
+            }
             if let historyStart {
-                if dose.end <= historyStart && !(dose.isMutable && dose.start == historyStart) { continue }
-                if dose.kind == .bolus && dose.start < historyStart { continue }
+                if (dose.end <= historyStart && !(dose.isMutable && dose.start == historyStart)) || (dose.kind == .bolus && dose.start < historyStart) {
+                    if sourceDoses[dose.id] != nil || committed[dose.id] != nil {
+                        if wasSubmitted(dose.id) {
+                            conflicts[dose.id] = .init(original: sourceDoses[dose.id], replacement: dose, deletion: false,
+                                                       reason: "A submitted dose moved outside the reporting period")
+                        } else {
+                            sourceDoses[dose.id] = nil; pending[dose.id] = nil; conflicts[dose.id] = nil
+                            if committed[dose.id] != nil { rebuildUnsubmitted() }
+                        }
+                    }
+                    continue
+                }
                 if dose.start < historyStart, duration > 0 {
                     dose.delivered = dose.delivered.map { $0 * dose.end.timeIntervalSince(historyStart) / duration }
                     dose.start = historyStart
@@ -153,15 +175,18 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
                 // Finalisation still replaces a mutable marker even if its quantities are unchanged.
                 if pending[dose.id] != nil { pending[dose.id] = dose }
                 sourceDoses[dose.id] = dose
+                conflicts[dose.id] = nil
                 continue
             }
             if legacyIDs.contains(dose.id), sourceDoses[dose.id] == nil, matchesLegacyRecords(dose) {
                 sourceDoses[dose.id] = dose
+                conflicts[dose.id] = nil
                 continue
             }
             if committed[dose.id] != nil {
-                if lastSubmittedIndex == nil {
+                if !wasSubmitted(dose.id) {
                     sourceDoses[dose.id] = dose
+                    conflicts[dose.id] = nil
                     rebuildUnsubmitted()
                 } else {
                     conflicts[dose.id] = .init(original: sourceDoses[dose.id], replacement: dose, deletion: false,
@@ -173,7 +198,7 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
                 droppedIDs.insert(dose.id)
                 conflicts[dose.id] = .init(original: nil, replacement: dose, deletion: false,
                                            reason: "A previously unseen dose arrived for a submitted period")
-                if lastSubmittedIndex == nil {
+                if lastSubmittedIndex == nil || submissionBoundary.map({ dose.start >= $0 }) == true {
                     sourceDoses[dose.id] = dose
                     conflicts[dose.id] = nil
                     droppedIDs.remove(dose.id)
@@ -183,6 +208,7 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
             }
             sourceDoses[dose.id] = dose
             pending[dose.id] = dose
+            conflicts[dose.id] = nil
         }
     }
 
@@ -237,6 +263,9 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
         if lhs.kind == .bolus {
             return lhs.programmed == rhs.programmed && (lhs.delivered ?? lhs.programmed) == (rhs.delivered ?? rhs.programmed)
         }
+        // Earlier stores rounded dates to milliseconds. An unchanged measured volume is still the same
+        // delivery even if that rounding slightly changes its reconstructed effective rate.
+        if let left = lhs.delivered, let right = rhs.delivered { return abs(left - right) < 1e-8 }
         return abs(rate(lhs) - rate(rhs)) < (legacyIDs.contains(lhs.id) ? 0.0001 : 1e-8)
     }
 
@@ -258,10 +287,57 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
         }
     }
 
+    /// Capture exactly the prefix which may reach the server, including a dose crossing its boundary.
+    public mutating func markSubmitted(through index: UInt32) {
+        lastSubmittedIndex = index
+        submittedThrough = committedThrough
+        submittedState = state
+        submittedIDs = Set(committed.keys)
+    }
+
+    private var submissionBoundary: Date? {
+        if let submittedThrough { return submittedThrough }
+        // Migration of old files whose lastSubmittedIndex was recorded without an explicit checkpoint.
+        guard let index = lastSubmittedIndex else { return nil }
+        return records.last(where: { $0.index <= index && $0.record == .download })?.date
+    }
+
+    private func wasSubmitted(_ id: String) -> Bool {
+        guard lastSubmittedIndex != nil else { return false }
+        if let submittedIDs { return submittedIDs.contains(id) }
+        guard let dose = sourceDoses[id], let boundary = submissionBoundary else { return true }
+        return dose.start < boundary
+    }
+
+    /// Migrate membership from the original source snapshots, before a deletion or edit removes them.
+    private mutating func captureSubmissionCheckpoint() {
+        guard submittedIDs == nil, let index = lastSubmittedIndex, let boundary = submissionBoundary else { return }
+        let ids = Set(committed.keys.filter { wasSubmitted($0) })
+        submittedIDs = ids; submittedThrough = boundary
+        if let record = records.last(where: {
+            guard $0.index <= index else { return false }
+            switch $0.record { case .basal, .suspend: return true; default: return false }
+        })?.record {
+            switch record {
+            case let .basal(rate, minutes): submittedState = .init(delivery: minutes == 0 ? .scheduled(rate: rate) : .temporary(rate: rate))
+            case .suspend: submittedState = .init(delivery: .suspended)
+            default: break
+            }
+        }
+    }
+
     private mutating func rebuildUnsubmitted() {
         let first = records.first?.index ?? nextIndex
-        records = []; committed = [:]; committedThrough = nil; state = nil; nextIndex = first
-        pending = sourceDoses
+        if let index = lastSubmittedIndex, let boundary = submissionBoundary {
+            records.removeAll { $0.index > index }
+            submittedThrough = boundary
+            committed = committed.filter { submittedIDs!.contains($0.key) }
+            committedThrough = boundary; state = submittedState; nextIndex = index + 1
+            pending = sourceDoses.filter { !submittedIDs!.contains($0.key) || $0.value.end > boundary }
+        } else {
+            records = []; committed = [:]; committedThrough = nil; state = nil; nextIndex = first
+            pending = sourceDoses
+        }
     }
 
     private mutating func event(_ date: Date, _ record: IBFRecord, _ zone: TimeZone) -> IBFHistoryEvent {
@@ -312,7 +388,7 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, ownerID, ownerEmail, sourceID, reportingContextData, serial, powerUp, podLot, podSerial, nextIndex, records, committedThrough
-        case state, pending, committed, sourceDoses, conflicts, unclassified, stagedDeletions, droppedIDs, legacyIDs, legacyLateDoses, lateDoses, lastSubmittedIndex, lastUploadedIndex, historyStart
+        case state, pending, committed, sourceDoses, conflicts, unclassified, stagedDeletions, droppedIDs, legacyIDs, legacyLateDoses, lateDoses, lastSubmittedIndex, lastUploadedIndex, historyStart, submittedThrough, submittedState, submittedIDs
     }
 
     public init(from decoder: Decoder) throws {
@@ -336,15 +412,19 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
         legacyLateDoses = try c.decodeIfPresent(Int.self, forKey: .legacyLateDoses) ?? c.decodeIfPresent(Int.self, forKey: .lateDoses) ?? 0
         let previousIndex = try c.decodeIfPresent(UInt32.self, forKey: .lastUploadedIndex)
         lastSubmittedIndex = try c.decodeIfPresent(UInt32.self, forKey: .lastSubmittedIndex) ?? previousIndex
-        lastUploadedIndex = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) == 2 ? previousIndex : nil
+        submittedThrough = try c.decodeIfPresent(Date.self, forKey: .submittedThrough)
+        submittedState = try c.decodeIfPresent(DeliveryTimeline.State.self, forKey: .submittedState)
+        submittedIDs = try c.decodeIfPresent(Set<String>.self, forKey: .submittedIDs)
+        lastUploadedIndex = (try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1) >= 2 ? previousIndex : nil
         let version = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         legacyIDs = try c.decodeIfPresent(Set<String>.self, forKey: .legacyIDs) ?? (version == 1 ? Set(committed.keys).union(pending.keys) : [])
-        guard version <= 2, nextIndex > (records.last?.index ?? 0) else { throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: c, debugDescription: "Unsupported or inconsistent history") }
+        guard version <= 3, nextIndex > (records.last?.index ?? 0) else { throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: c, debugDescription: "Unsupported or inconsistent history") }
+        captureSubmissionCheckpoint()
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(2, forKey: .schemaVersion); try c.encodeIfPresent(ownerID, forKey: .ownerID); try c.encodeIfPresent(sourceID, forKey: .sourceID)
+        try c.encode(3, forKey: .schemaVersion); try c.encodeIfPresent(ownerID, forKey: .ownerID); try c.encodeIfPresent(sourceID, forKey: .sourceID)
         try c.encodeIfPresent(ownerEmail, forKey: .ownerEmail)
         try c.encodeIfPresent(reportingContextData, forKey: .reportingContextData)
         try c.encode(serial, forKey: .serial); try c.encode(powerUp, forKey: .powerUp); try c.encode(podLot, forKey: .podLot); try c.encode(podSerial, forKey: .podSerial)
@@ -354,6 +434,8 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
         try c.encode(unclassified, forKey: .unclassified); try c.encode(stagedDeletions, forKey: .stagedDeletions); try c.encode(legacyIDs, forKey: .legacyIDs)
         try c.encode(legacyLateDoses, forKey: .legacyLateDoses); try c.encode(lateDoses, forKey: .lateDoses)
         try c.encodeIfPresent(lastSubmittedIndex, forKey: .lastSubmittedIndex); try c.encodeIfPresent(lastUploadedIndex, forKey: .lastUploadedIndex)
+        try c.encodeIfPresent(submittedThrough, forKey: .submittedThrough); try c.encodeIfPresent(submittedState, forKey: .submittedState)
+        try c.encodeIfPresent(submittedIDs, forKey: .submittedIDs)
         try c.encodeIfPresent(historyStart, forKey: .historyStart)
     }
 }
