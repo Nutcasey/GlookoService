@@ -39,6 +39,7 @@
 		DCFDBC6D1EE4D0DDF4935D32 /* HistoryRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0A61A29622C7D2B0AE2FABC /* HistoryRepository.swift */; };
 		DE0EAA8CDC9A622A76767AAD /* LoopKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4B7525F927564C2D84B0BCBA /* LoopKit.framework */; };
 		E7F0BDBAFB8A997455C96723 /* LoopKitUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 79EB4DAB821E6034482C9839 /* LoopKitUI.framework */; };
+		E9450BFE11D2BE09C152E534 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3D08E50B455599FA482C5464 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -113,6 +114,7 @@
 		2DFE1312B7FF629716A237B6 /* CarbOutboxRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarbOutboxRepository.swift; sourceTree = "<group>"; };
 		342A3C5C150C1AE866DA2DB2 /* SyncReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncReader.swift; sourceTree = "<group>"; };
 		3563057B02CFD6AA10761DC6 /* ServiceUploadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceUploadTests.swift; sourceTree = "<group>"; };
+		3D08E50B455599FA482C5464 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		3D0F3BDEDB49D12884F88E08 /* GlookoServiceKit.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = GlookoServiceKit.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		3D8D18557ABE513F0AD1488F /* GlookoServiceKitUI.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = GlookoServiceKitUI.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		3FCD333294FAD9B1CB5B9757 /* CarbOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarbOutbox.swift; sourceTree = "<group>"; };
@@ -249,6 +251,7 @@
 		B42D45BA12D205C018B8D223 /* GlookoServiceKitUI */ = {
 			isa = PBXGroup;
 			children = (
+				3D08E50B455599FA482C5464 /* Assets.xcassets */,
 				431FFF85D52B938076630689 /* GlookoService+UI.swift */,
 			);
 			path = GlookoServiceKitUI;
@@ -345,6 +348,7 @@
 			buildConfigurationList = E98E2A43890B60821DC83DFA /* Build configuration list for PBXNativeTarget "GlookoServiceKitUI" */;
 			buildPhases = (
 				069037FC1071C12EE9393671 /* Sources */,
+				A37518A7AF2913EBDCCE354B /* Resources */,
 				A6193FC62332288AAE0844AE /* Frameworks */,
 				3E4EDE79015EE70F5C33CCBD /* Capture Glooko build */,
 			);
@@ -430,6 +434,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A37518A7AF2913EBDCCE354B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E9450BFE11D2BE09C152E534 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
 		3E4EDE79015EE70F5C33CCBD /* Capture Glooko build */ = {
