@@ -52,6 +52,8 @@ The core builds/tests on macOS with `swift test`. The iOS plugin builds inside L
 
 After adding source files, run `xcodegen generate` and include the regenerated project with the change.
 
+The service-list icon is Glooko's blue-and-white app artwork from its [official App Store listing](https://apps.apple.com/gb/app/glooko-track-diabetes-data/id471942748), bundled locally in the UI framework's asset catalogue.
+
 Run the `GlookoServiceTests` scheme on an iOS simulator for the service integration suite. Its dedicated application host provides an isolated sandbox and Keychain; every HTTP request is intercepted. Simulator builds need ad hoc signing (`CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual`) so Xcode supplies the host's simulated Keychain entitlements. Disabling signing produces a host without usable Keychain access. Loop's `RemoteDataServicesManagerTests` separately verifies that restoration queries unchanged source streams.
 
 ## Verification and limits

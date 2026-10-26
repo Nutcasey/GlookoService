@@ -5,7 +5,9 @@ import LoopKitUI
 import GlookoServiceKit
 
 extension GlookoService: ServiceUI {
-    public static var image: UIImage? { nil }
+    public static var image: UIImage? {
+        UIImage(named: "Glooko", in: Bundle(for: GlookoServiceCoordinator.self), compatibleWith: nil)
+    }
     public static func setupViewController(colorPalette: LoopUIColorPalette, pluginHost: PluginHost) -> SetupUIResult<ServiceViewController, ServiceUI> {
         .userInteractionRequired(GlookoServiceCoordinator(service: nil))
     }
