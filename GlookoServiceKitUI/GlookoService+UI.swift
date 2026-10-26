@@ -190,6 +190,19 @@ struct StatusView: View {
     @ObservedObject var model: StatusModel
     @State private var confirmDelete = false
     @State private var confirmNewPeriod = false
+    private static let build: String = {
+        let bundle = Bundle(for: GlookoServiceCoordinator.self)
+        guard let url = bundle.url(forResource: "GlookoBuild", withExtension: "plist"),
+              let data = try? Data(contentsOf: url),
+              let details = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let commit = details["commit"] as? String,
+              let dirty = details["dirty"] as? Bool,
+              let date = details["date"] as? Date else { return "Unavailable" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_GB")
+        formatter.dateFormat = "d MMMM yyyy 'at' HH:mm:ss z"
+        return commit + (dirty ? ".dirty" : "") + "\n" + formatter.string(from: date)
+    }()
     private func text(_ date: Date?) -> String {
         guard let date else { return "Never" }
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_GB")
@@ -201,6 +214,7 @@ struct StatusView: View {
             Section(header: Text("Account")) {
                 row("Signed in as", model.snapshot.email ?? "—")
                 row("Pump source", model.snapshot.summary.sourceName ?? "Waiting for Loop")
+                row("Build", Self.build).accessibilityIdentifier("glooko-build")
             }
             Section(header: Text("Uploads"), footer: Text("Final history settles for one hour. Loop must finish reading its history before sending. Submission and confirmed Glooko records are tracked separately.")) {
                 row("Last submission", text(model.snapshot.status.lastUploadAt))
@@ -217,6 +231,7 @@ struct StatusView: View {
                 row("Last confirmed", text(model.snapshot.status.lastCarbConfirmedAt))
                 row("Waiting to send", String(model.snapshot.summary.pendingCarbs))
                 if let detail = model.snapshot.status.carbDetail { Text(detail).foregroundColor(.secondary) }
+                if let error = model.snapshot.status.carbError { Text(error).foregroundColor(.red) }
             }
             Section(header: Text("History")) {
                 row("History from", text(model.snapshot.summary.historyStart))

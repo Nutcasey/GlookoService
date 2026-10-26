@@ -19,6 +19,7 @@ public final class GlookoService: Service {
         public var verificationDetail: String?
         public var lastCarbConfirmedAt: Date?
         public var carbDetail: String?
+        public var carbError: String?
     }
     public struct Summary {
         public var serial: UInt32
@@ -43,6 +44,7 @@ public final class GlookoService: Service {
     private let queue = DispatchQueue(label: "com.loopkit.GlookoService")
     private let log = OSLog(subsystem: "com.loopkit.GlookoService", category: "GlookoService")
     private let repository: HistoryRepository
+    private let carbRepository: CarbOutboxRepository
     private var account: GlookoAccount?
     private var accountID: String?
     private var storedEmail: String?
@@ -58,11 +60,21 @@ public final class GlookoService: Service {
     private var signInRequest: UUID?
     private var uploadTask: Task<Void, Never>?
     private var uploading = false
+    private var uploadWakeRequested = false
+    private var forcedUploadRequested = false
     private var client: GlookoClient?
     private var ownsLegacyCredentials = false
     private var carbs: CarbOutbox?
-    private var carbsSending = false
+    private var carbStorageError: String?
+    private var carbStorageCreated = false
+    private var carbTask: Task<Void, Never>?
+    private var carbTaskID: UUID?
+    private var carbRetryTask: Task<Void, Never>?
+    private var carbRetryID: UUID?
+    private var carbWakeRequested = false
+    private var carbRetryDelay: TimeInterval = 30
     private var carbAnchorReset = false
+    private var carbIdentityVersion = 1
     private let uploadInterval: TimeInterval = 15 * 60
     public static let region = GlookoClient.Region(signInHosts: ["eu.api.glooko.com", "global.api.glooko.com"], dataHost: "eu.api.glooko.com")
 
@@ -71,10 +83,14 @@ public final class GlookoService: Service {
             .appendingPathComponent("GlookoService", isDirectory: true)
     }
 
-    public init() { repository = HistoryRepository(directory: Self.historyDirectory) }
+    public init() {
+        repository = HistoryRepository(directory: Self.historyDirectory)
+        carbRepository = CarbOutboxRepository(directory: Self.historyDirectory)
+    }
 
     public init?(rawState: RawStateValue) {
         repository = HistoryRepository(directory: Self.historyDirectory)
+        carbRepository = CarbOutboxRepository(directory: Self.historyDirectory)
         storedEmail = rawState["email"] as? String
         accountID = rawState["accountID"] as? String
         ownsLegacyCredentials = rawState["legacyCredentialsOwned"] as? Bool ?? (accountID == nil && storedEmail != nil)
@@ -84,6 +100,9 @@ public final class GlookoService: Service {
         currentStatus.lastError = rawState["lastError"] as? String
         currentStatus.lastCarbConfirmedAt = rawState["lastCarbConfirmedAt"] as? Date
         carbAnchorReset = rawState["carbAnchorReset"] as? Bool ?? false
+        carbIdentityVersion = rawState["carbIdentityVersion"] as? Int ?? 0
+        // Older builds lack the marker, but a confirmation proves that an outbox already existed.
+        carbStorageCreated = (rawState["carbStorageCreated"] as? Bool ?? false) || currentStatus.lastCarbConfirmedAt != nil
         if rawState["verificationVersion"] as? Int == 1 {
             currentStatus.lastConfirmedAt = rawState["lastConfirmedAt"] as? Date
             currentStatus.uploadedThrough = rawState["uploadedThrough"] as? Date
@@ -100,11 +119,12 @@ public final class GlookoService: Service {
             }
             catch { storageError = "Could not restore pump history: \(error)"; currentStatus.lastError = storageError }
         }
-        if let accountID { carbs = Self.loadCarbs(accountID) }
-        if onboarded && !carbAnchorReset {
-            // Earlier versions acknowledged carbs without sending them; let Loop resend its retained entries once.
+        if let accountID { restoreCarbs(accountID) }
+        if onboarded && (!carbAnchorReset || carbIdentityVersion < 1) {
+            // Replay retained sources once when adding provenance, so legacy GUIDs can be bound from
+            // the original version's clinical contents instead of guessing ownership from an identifier.
             Self.resetLoopCarbAnchor()
-            carbAnchorReset = true
+            carbAnchorReset = true; carbIdentityVersion = 1
         }
         let service = accountID.map { Self.sessionService($0) } ?? Self.legacySessionService
         let cookie = (try? KeychainManager().getGenericPasswordForService(service)) ??
@@ -145,6 +165,8 @@ public final class GlookoService: Service {
             value["lastConfirmedAt"] = currentStatus.lastConfirmedAt
             value["lastCarbConfirmedAt"] = currentStatus.lastCarbConfirmedAt
             value["carbAnchorReset"] = carbAnchorReset
+            value["carbIdentityVersion"] = carbIdentityVersion
+            value["carbStorageCreated"] = carbStorageCreated
             value["reportingContexts"] = try? JSONEncoder().encode(contexts)
             return value
         }
@@ -185,7 +207,7 @@ public final class GlookoService: Service {
             try KeychainManager().replaceGenericPassword(fresh.sessionCookie, forService: Self.sessionService(verified.id))
             removeOwnedLegacyCredentials()
             history = owned; account = verified; accountID = verified.id; storedEmail = verified.email
-            if carbs == nil { carbs = Self.loadCarbs(verified.id) }
+            if carbs == nil { restoreCarbs(verified.id) }
             carbAnchorReset = true
             client = fresh; onboarded = true; signInRequest = nil; currentStatus.lastError = nil
         }
@@ -198,7 +220,7 @@ public final class GlookoService: Service {
     public func completeDelete() {
         let keys = queue.sync { () -> (String, String, Bool) in
             deleted = true; onboarded = false; lifecycle = UUID(); signInRequest = nil
-            uploadTask?.cancel(); uploadTask = nil; uploading = false; client = nil
+            cancelUploads(); client = nil
             return (accountID.map(Self.passwordService) ?? Self.legacyPasswordService,
                     accountID.map(Self.sessionService) ?? Self.legacySessionService, ownsLegacyCredentials)
         }
@@ -226,10 +248,21 @@ public final class GlookoService: Service {
             fresh.ownerID = accountID; fresh.ownerEmail = storedEmail; fresh.sourceID = source; fresh.historyStart = Date()
             fresh.reportingContextData = try JSONEncoder().encode(contexts)
             try repository.save(fresh)
-            uploadTask?.cancel(); uploadTask = nil; uploading = false; lifecycle = UUID()
+            cancelUploads(); lifecycle = UUID()
             history = fresh; storageError = nil; currentStatus = Status()
+            currentStatus.carbError = carbStorageError
         }
         changed()
+        Task { await sendCarbs(force: true) }
+    }
+
+    /// Called on the state queue. Every request-owning task belongs to this lifecycle.
+    private func cancelUploads() {
+        uploadTask?.cancel(); uploadTask = nil; uploading = false
+        uploadWakeRequested = false; forcedUploadRequested = false
+        carbTask?.cancel(); carbTask = nil; carbTaskID = nil
+        carbRetryTask?.cancel(); carbRetryTask = nil; carbRetryID = nil
+        carbWakeRequested = false
     }
 
     private func check(_ generation: UUID) throws {
@@ -273,7 +306,7 @@ public final class GlookoService: Service {
                     try KeychainManager().replaceGenericPassword(password, forService: Self.passwordService(verified.id))
                 }
                 history = migrated; accountID = verified.id
-                if carbs == nil { carbs = Self.loadCarbs(verified.id) }
+                if carbs == nil { restoreCarbs(verified.id) }
             }
             try KeychainManager().replaceGenericPassword(fresh.sessionCookie, forService: Self.sessionService(verified.id))
             removeOwnedLegacyCredentials()
@@ -293,63 +326,68 @@ public final class GlookoService: Service {
     }
 
     public func uploadIfNeeded(force: Bool = false) async {
+        // Carbs are independent of pump eligibility and must also be drained by Upload now.
+        async let carbUpload: Void = sendCarbs(force: force)
         let task = queue.sync { () -> Task<Void, Never>? in
-            guard onboarded, !deleted, !uploading else { return nil }
-            if !force, let last = currentStatus.lastAttemptAt, Date().timeIntervalSince(last) < uploadInterval { return nil }
-            uploading = true
-            let generation = lifecycle
-            let task = Task { [weak self] in
-                guard let self else { return }
-                await self.performUpload(force: force, generation: generation)
+            guard onboarded, !deleted else { return nil }
+            if uploading {
+                uploadWakeRequested = true; forcedUploadRequested = forcedUploadRequested || force
+                return uploadTask
             }
-            uploadTask = task
-            return task
+            if !force, let last = currentStatus.lastAttemptAt, Date().timeIntervalSince(last) < uploadInterval { return nil }
+            return beginUpload(force: force, generation: lifecycle)
         }
         await task?.value
+        await carbUpload
+    }
+
+    /// Called on the state queue so cancellation and a follow-up drain cannot lose ownership of a task.
+    private func beginUpload(force: Bool, generation: UUID) -> Task<Void, Never> {
+        uploading = true; uploadWakeRequested = false; forcedUploadRequested = false
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performUpload(force: force, generation: generation)
+        }
+        uploadTask = task
+        return task
     }
 
     private func performUpload(force: Bool, generation: UUID) async {
         defer {
-            queue.sync { if lifecycle == generation { uploading = false; uploadTask = nil } }
+            queue.sync {
+                guard lifecycle == generation else { return }
+                let retry = uploadWakeRequested, forced = forcedUploadRequested
+                uploading = false; uploadTask = nil; uploadWakeRequested = false; forcedUploadRequested = false
+                if retry, !deleted, onboarded,
+                   forced || (currentStatus.lastAttemptAt.map({ Date().timeIntervalSince($0) >= uploadInterval }) ?? true) {
+                    _ = beginUpload(force: forced, generation: generation)
+                }
+            }
             changed()
         }
         do {
             try check(generation)
             try queue.sync {
-                guard storageError == nil else { throw ServiceError.blocked(storageError!) }
-                guard doseQueryDrained, settingsQueryDrained else { throw ServiceError.blocked("Waiting for Loop to finish reading source history and settings") }
-                guard let context = contexts.last, context.isRealPump else { throw ServiceError.blocked("Uploads are paused while a real pump source is unavailable") }
-                guard context.settings != nil else { throw ServiceError.blocked(context.problem ?? "Waiting for complete Loop settings") }
-                guard var owned = history else { throw HistoryRepository.Failure.missingHistory }
-                if owned.sourceID == nil { owned.sourceID = context.sourceID }
-                guard owned.sourceID == context.sourceID else { throw ServiceError.blocked("The connected pump has changed. Review the source before starting a new reporting period.") }
-                let captured = contexts
-                owned.classifyStaged { dose in
-                    let source = captured.last(where: { $0.date <= dose.start }) ?? captured.first
-                    if captured.contains(where: { $0.date > dose.start && $0.date < dose.end && $0.sourceID != source?.sourceID }) {
-                        return "unverified-pump-source" // A dose spanning a source change needs review, not guessed attribution.
-                    }
-                    return source?.sourceID ?? (source == nil ? nil : "unverified-pump-source")
-                }
-                owned.commit(now: Date(), timeZone: context.timeZone)
-                try repository.save(owned)
-                history = owned
-                currentStatus.lastError = nil
-                if let reason = owned.blockedReason(now: Date()) { throw ServiceError.blocked(reason) }
+                try reconcileHistory()
             }
             guard queue.sync(execute: { history?.hasUnuploadedRecords == true }) else { return }
             var transport = try await authenticatedClient(generation)
             try check(generation)
             let prepared = try queue.sync { () throws -> (Data, UInt32, IngestionManifest)? in
+                guard lifecycle == generation, !deleted else { throw CancellationError() }
+                // Authentication is an await boundary. Include every source change received during it
+                // before creating the immutable submitted prefix, including deletions and settings.
+                try reconcileHistory()
                 guard lifecycle == generation, !deleted, doseQueryDrained, settingsQueryDrained,
                       let context = contexts.last, context.sourceID == history?.sourceID,
                       let settings = context.settings, var owned = history else { throw CancellationError() }
                 guard let file = try owned.exportFile(timeZone: context.timeZone, settings: settings) else { return nil }
                 let manifest = IngestionManifest(serial: owned.serial, events: owned.exportedEvents,
                                                  timeZone: context.timeZone, committedThrough: owned.committedThrough)
-                owned.lastSubmittedIndex = file.lastIndex
+                owned.markSubmitted(through: file.lastIndex)
                 try repository.save(owned)
                 history = owned; currentStatus.lastAttemptAt = Date()
+                uploadWakeRequested = false; forcedUploadRequested = false
                 return (file.data, file.lastIndex, manifest)
             }
             guard let prepared else { return }
@@ -386,64 +424,147 @@ public final class GlookoService: Service {
         }
     }
 
+    /// Called on the state queue, both before authentication and at the submission-intent boundary.
+    private func reconcileHistory() throws {
+        guard storageError == nil else { throw ServiceError.blocked(storageError!) }
+        guard doseQueryDrained, settingsQueryDrained else { throw ServiceError.blocked("Waiting for Loop to finish reading source history and settings") }
+        guard let context = contexts.last, context.isRealPump else { throw ServiceError.blocked("Uploads are paused while a real pump source is unavailable") }
+        guard context.settings != nil else { throw ServiceError.blocked(context.problem ?? "Waiting for complete Loop settings") }
+        guard var owned = history else { throw HistoryRepository.Failure.missingHistory }
+        if owned.sourceID == nil { owned.sourceID = context.sourceID }
+        guard owned.sourceID == context.sourceID else { throw ServiceError.blocked("The connected pump has changed. Review the source before starting a new reporting period.") }
+        let captured = contexts
+        owned.classifyStaged { dose in
+            let source = captured.last(where: { $0.date <= dose.start }) ?? captured.first
+            if captured.contains(where: { $0.date > dose.start && $0.date < dose.end && $0.sourceID != source?.sourceID }) {
+                return "unverified-pump-source"
+            }
+            return source?.sourceID ?? (source == nil ? nil : "unverified-pump-source")
+        }
+        owned.commit(now: Date(), timeZone: context.timeZone)
+        try repository.save(owned)
+        history = owned
+        currentStatus.lastError = owned.blockedReason(now: Date())
+        if let reason = currentStatus.lastError { throw ServiceError.blocked(reason) }
+    }
+
     // MARK: Carbs
 
     /// Carbs use Glooko's meal/food upserts, independent of the pump file: they are sent as soon as Loop reports them.
-    private func sendCarbs() async {
-        let start = queue.sync { () -> (UUID, [SourceCarb], Set<String>)? in
-            guard onboarded, !deleted, !carbsSending, accountID != nil, var outbox = carbs, !outbox.due.isEmpty else { return nil }
-            let due = outbox.due
-            outbox.markSubmitted(due)
-            do { try saveCarbs(outbox) } catch { currentStatus.carbDetail = "Could not save carbs: \(error)"; return nil }
-            carbs = outbox; carbsSending = true
-            return (lifecycle, due, outbox.retiringMeals)
+    private func sendCarbs(force: Bool = false) async {
+        let task = queue.sync { () -> Task<Void, Never>? in
+            guard onboarded, !deleted, accountID != nil else { return nil }
+            if force {
+                carbRetryTask?.cancel(); carbRetryTask = nil; carbRetryID = nil
+            }
+            if let task = carbTask { carbWakeRequested = true; return task }
+            guard force || carbRetryTask == nil else { return nil }
+            if carbs == nil, let accountID { restoreCarbs(accountID) }
+            guard carbStorageError == nil, carbs?.due.isEmpty == false else { return nil }
+            let generation = lifecycle, id = UUID()
+            carbTaskID = id; carbWakeRequested = false
+            let task = Task<Void, Never> { [weak self] in
+                guard let self else { return }
+                await self.performCarbUploads(generation: generation, id: id)
+            }
+            carbTask = task
+            return task
         }
-        guard let (generation, due, retiring) = start else { return }
-        defer { queue.sync { carbsSending = false }; changed() }
-        let timeZone = queue.sync { contexts.last?.timeZone ?? .current }
+        await task?.value
+    }
+
+    private func performCarbUploads(generation: UUID, id: UUID) async {
+        defer {
+            queue.sync {
+                guard lifecycle == generation, carbTaskID == id else { return }
+                carbTask = nil; carbTaskID = nil
+                if !deleted, onboarded, carbs?.due.isEmpty == false {
+                    scheduleCarbRetry(generation: generation, delay: carbWakeRequested ? 0 : carbRetryDelay)
+                    carbRetryDelay = min(carbRetryDelay * 2, uploadInterval)
+                } else { carbRetryDelay = 30 }
+                carbWakeRequested = false
+            }
+            changed()
+        }
         do {
             var transport = try await authenticatedClient(generation)
-            let result: (confirmed: [SourceCarb], detail: String)
-            do { result = try await transport.submitCarbs(due, retiringMeals: retiring, timeZone: timeZone) }
-            catch GlookoError.authenticationRequired {
-                transport = try await authenticatedClient(generation, renew: true)
-                result = try await transport.submitCarbs(due, retiringMeals: retiring, timeZone: timeZone)
+            while true {
+                try check(generation)
+                let batch = try queue.sync { () throws -> ([SourceCarb], Set<String>, TimeZone)? in
+                    guard lifecycle == generation, carbTaskID == id, !deleted else { throw CancellationError() }
+                    guard var outbox = carbs else { throw ServiceError.blocked(carbStorageError ?? "Carb storage is unavailable") }
+                    let due = Array(outbox.due.prefix(100))
+                    guard !due.isEmpty else { return nil }
+                    outbox.markSubmitted(due)
+                    try saveCarbs(outbox)
+                    carbs = outbox; carbWakeRequested = false
+                    return (due, outbox.retiringMeals, contexts.last?.timeZone ?? .current)
+                }
+                guard let (due, retiring, timeZone) = batch else { return }
+                let result: (confirmed: [SourceCarb], detail: String)
+                do { result = try await transport.submitCarbs(due, retiringMeals: retiring, timeZone: timeZone) }
+                catch GlookoError.authenticationRequired {
+                    transport = try await authenticatedClient(generation, renew: true)
+                    try check(generation)
+                    result = try await transport.submitCarbs(due, retiringMeals: retiring, timeZone: timeZone)
+                }
+                try check(generation)
+                let shouldContinue = try queue.sync { () throws -> Bool in
+                    guard lifecycle == generation, carbTaskID == id, !deleted else { throw CancellationError() }
+                    guard var outbox = carbs else { throw ServiceError.blocked("Carb storage is unavailable") }
+                    for carb in result.confirmed { outbox.confirm(carb) }
+                    try saveCarbs(outbox)
+                    carbs = outbox; currentStatus.carbError = nil; currentStatus.carbDetail = result.detail
+                    if !result.confirmed.isEmpty { currentStatus.lastCarbConfirmedAt = Date() }
+                    let sent = Dictionary(uniqueKeysWithValues: due.map { ($0.storageID, $0) })
+                    // Drain edits/new entries immediately. Unchanged unconfirmed rows wait for backoff.
+                    return outbox.due.contains { sent[$0.storageID] != $0 }
+                }
+                changed()
+                if !shouldContinue { return }
             }
-            try check(generation)
+        } catch is CancellationError { }
+        catch {
             queue.sync {
-                guard var outbox = carbs else { return }
-                for carb in result.confirmed { outbox.confirm(carb) }
-                try? saveCarbs(outbox)
-                carbs = outbox
-                currentStatus.carbDetail = result.detail
-                if !result.confirmed.isEmpty { currentStatus.lastCarbConfirmedAt = Date() }
+                if lifecycle == generation, !deleted { currentStatus.carbError = "Carbs not sent yet: \(error)" }
             }
-        } catch is CancellationError {
-        } catch {
-            queue.sync { if lifecycle == generation { currentStatus.carbDetail = "Carbs not sent yet: \(error)" } }
         }
     }
 
-    private static func carbsURL(_ accountID: String) -> URL {
-        historyDirectory.appendingPathComponent(GlookoAccount(id: accountID, email: "").storageKey, isDirectory: true)
-            .appendingPathComponent("carbs.json")
+    /// Called on the state queue. The delayed task holds no service while sleeping and is cancelled on deletion.
+    private func scheduleCarbRetry(generation: UUID, delay: TimeInterval) {
+        carbRetryTask?.cancel()
+        let id = UUID(); carbRetryID = id
+        carbRetryTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            catch { return }
+            guard let self else { return }
+            let ready = self.queue.sync { () -> Bool in
+                guard self.lifecycle == generation, self.carbRetryID == id, !self.deleted else { return false }
+                self.carbRetryTask = nil; self.carbRetryID = nil
+                return true
+            }
+            if ready { await self.sendCarbs() }
+        }
     }
 
-    private static func loadCarbs(_ accountID: String) -> CarbOutbox? {
-        guard let data = try? Data(contentsOf: carbsURL(accountID)) else { return nil }
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-        var outbox = try? decoder.decode(CarbOutbox.self, from: data)
-        outbox?.migrateToStandaloneFoods()
-        return outbox
+    /// A failed restoration remains visible and never supplies an empty replacement to a source callback.
+    private func restoreCarbs(_ accountID: String) {
+        do {
+            carbs = try carbRepository.load(accountID: accountID, historyStart: history?.historyStart, required: carbStorageCreated)
+            carbStorageError = nil; currentStatus.carbError = nil
+        } catch {
+            carbs = nil
+            carbStorageError = "Could not restore carb uploads: \(error)"
+            currentStatus.carbError = carbStorageError
+        }
     }
 
     /// Called on the state queue.
     private func saveCarbs(_ outbox: CarbOutbox) throws {
         guard let accountID else { throw ServiceError.signInRequired }
-        let url = Self.carbsURL(accountID)
-        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try encoder.encode(outbox).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try carbRepository.save(outbox, accountID: accountID)
+        carbStorageCreated = true
     }
 
     /// Loop keeps each service's carb query position in its app-group defaults (RemoteDataServicesManager).
@@ -481,7 +602,7 @@ extension GlookoService: RemoteDataService {
             }
             completion(.success(true))
             changed()
-            if created.isEmpty && deleted.isEmpty { Task { await uploadIfNeeded(); await sendCarbs() } }
+            if created.isEmpty && deleted.isEmpty { Task { await uploadIfNeeded() } }
         } catch {
             queue.sync { currentStatus.lastError = "Could not store source history: \(error)" }
             changed(); completion(.failure(error))
@@ -518,12 +639,14 @@ extension GlookoService: RemoteDataService {
         do {
             try queue.sync {
                 guard !self.deleted, accountID != nil else { throw ServiceError.blocked("Sign in before storing carbs") }
-                var outbox = carbs ?? CarbOutbox(historyStart: history?.historyStart)
+                if carbs == nil, let accountID { restoreCarbs(accountID) }
+                guard var outbox = carbs else { throw ServiceError.blocked(carbStorageError ?? "Carb storage is unavailable") }
                 // Entries Glooko itself wrote to Health would come back as duplicates.
                 let source = (created + updated + deleted).filter { !$0.provenanceIdentifier.lowercased().contains("glooko") }
-                outbox.stage(source.map { carb in
+                try outbox.stage(source.map { carb in
                     SourceCarb(id: carb.syncIdentifier ?? carb.uuid?.uuidString ?? "carb-\(carb.startDate.timeIntervalSince1970)",
-                               start: carb.startDate, grams: carb.grams, version: carb.syncVersion ?? 0, deleted: carb.operation == .delete)
+                               start: carb.startDate, grams: carb.grams, version: carb.syncVersion ?? 0, deleted: carb.operation == .delete,
+                               provenanceIdentifier: carb.provenanceIdentifier)
                 })
                 try saveCarbs(outbox)
                 carbs = outbox
@@ -532,7 +655,7 @@ extension GlookoService: RemoteDataService {
             changed()
             Task { await sendCarbs() }
         } catch {
-            queue.sync { currentStatus.carbDetail = "Could not store carbs: \(error)" }
+            queue.sync { currentStatus.carbError = "Could not store carbs: \(error)" }
             changed(); completion(.failure(error))
         }
     }

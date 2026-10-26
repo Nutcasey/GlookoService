@@ -110,24 +110,37 @@ public struct HistoryRepository {
 
     private func write(_ history: PumpHistoryLog, to url: URL) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .custom { date, encoder in
-            var c = encoder.singleValueContainer(); try c.encode(GlookoClient.isoTimestamp(date))
-        }
-        try encoder.encode(history).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try StoredJSON.encoder().encode(history).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     public static func decode(_ data: Data) throws -> PumpHistoryLog {
+        try StoredJSON.decoder().decode(PumpHistoryLog.self, from: data)
+    }
+}
+
+/// Preserve the source's complete Date value; accept the ISO strings used by earlier versions.
+enum StoredJSON {
+    static func encoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var value = encoder.singleValueContainer()
+            try value.encode(date.timeIntervalSinceReferenceDate)
+        }
+        return encoder
+    }
+
+    static func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
-            let c = try decoder.singleValueContainer()
-            let text = try c.decode(String.self)
+            let value = try decoder.singleValueContainer()
+            if let seconds = try? value.decode(Double.self), seconds.isFinite { return Date(timeIntervalSinceReferenceDate: seconds) }
+            let text = try value.decode(String.self)
             let fractional = ISO8601DateFormatter(); fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             guard let date = fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text) else {
-                throw DecodingError.dataCorruptedError(in: c, debugDescription: "Invalid history date")
+                throw DecodingError.dataCorruptedError(in: value, debugDescription: "Invalid saved date")
             }
             return date
         }
-        return try decoder.decode(PumpHistoryLog.self, from: data)
+        return decoder
     }
 }

@@ -60,6 +60,99 @@ final class ProductionHistoryTests: XCTestCase {
         XCTAssertThrowsError(try log.exportFile(timeZone: zone, settings: fixtureSettings()))
     }
 
+    func testUnsubmittedTailCorrectionsAndDeletionsPreserveTheSubmittedPrefix() throws {
+        var log = fresh()
+        log.ingest(created: [basal("first", 0, 1), bolus("submitted", 0.5)])
+        log.commit(now: at(1), timeZone: zone, settleDelay: 0)
+        let submitted = try XCTUnwrap(log.exportFile(timeZone: zone, settings: fixtureSettings()))
+        log.markSubmitted(through: submitted.lastIndex)
+        let prefix = log.records
+        for delete in [false, true] {
+            log.ingest(created: [basal("next", 1, 2), bolus("unsent", 1.5)])
+            log.commit(now: at(2), timeZone: zone, settleDelay: 0)
+            if delete { log.ingest(created: [], deleted: [bolus("unsent", 1.5)]) }
+            else { log.ingest(created: [bolus("unsent", 1.5, units: 2)]) }
+            log.commit(now: at(2), timeZone: zone, settleDelay: 0)
+            XCTAssertTrue(log.conflicts.isEmpty)
+            XCTAssertEqual(Array(log.records.prefix(prefix.count)), prefix)
+            XCTAssertEqual(try DecodedIBF(file(&log)).bolus, delete ? 1 : 3)
+        }
+        log.ingest(created: [bolus("submitted", 0.5, units: 2)])
+        XCTAssertNotNil(log.blockedReason(now: at(3)))
+        log.ingest(created: [bolus("submitted", 0.5)])
+        XCTAssertNil(log.blockedReason(now: at(3)))
+    }
+
+    func testSavedMeasuredDosesReplayWithoutConflictsAndValidSourceCorrectionsUnblock() throws {
+        let folder = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(".build/measured-history-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let repository = HistoryRepository(directory: folder)
+        var log = fresh(); log.ownerID = "offline-patient"; log.ownerEmail = "offline@example.test"
+        let dose = SourceDose(id: "measured", kind: .tempBasal, start: origin.addingTimeInterval(0.123456),
+                              end: origin.addingTimeInterval(300.654321), rate: 1.2, delivered: 0.1)
+        log.ingest(created: [dose, basal("close", 1, 2, rate: 0)])
+        log.commit(now: at(3), timeZone: zone, settleDelay: 0)
+        let exported = try XCTUnwrap(log.exportFile(timeZone: zone, settings: fixtureSettings()))
+        log.markSubmitted(through: exported.lastIndex)
+        try repository.save(log)
+        var restored = try repository.loadExisting(accountID: "offline-patient", legacyEmail: nil)
+        XCTAssertEqual(restored.sourceDoses[dose.id]?.start, dose.start)
+        restored.ingest(created: [dose])
+        XCTAssertTrue(restored.conflicts.isEmpty)
+        // Also accept a v2 store's rounded timestamps without treating the unchanged measured units as a new rate.
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .custom { date, encoder in
+            var value = encoder.singleValueContainer(); try value.encode(GlookoClient.isoTimestamp(date))
+        }
+        var old = try HistoryRepository.decode(encoder.encode(log))
+        old.ingest(created: [dose])
+        XCTAssertTrue(old.conflicts.isEmpty)
+        restored.ingest(created: [basal("invalid-unsent", 3, 4, rate: -1)])
+        XCTAssertNotNil(restored.blockedReason(now: at(5)))
+        restored.ingest(created: [basal("invalid-unsent", 3, 4)])
+        XCTAssertNil(restored.blockedReason(now: at(5)))
+    }
+
+    func testTailAmendmentsCannotMoveIntoSubmittedTimeAndLegacyDeletionDoesNotSubmitTheDeletedID() throws {
+        var log = fresh()
+        log.ingest(created: [basal("prefix", 0, 1)])
+        log.commit(now: at(1), timeZone: zone, settleDelay: 0)
+        let file = try XCTUnwrap(log.exportFile(timeZone: zone, settings: fixtureSettings()))
+        log.lastSubmittedIndex = file.lastIndex // A v2 checkpoint has no explicit membership snapshot.
+        log.ingest(created: [basal("tail", 1, 2), bolus("unsent", 1.5)])
+        log.commit(now: at(2), timeZone: zone, settleDelay: 0)
+        // Exercise migration from an actual old-format store with a committed, unsubmitted tail.
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        var old = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(log)) as? [String: Any])
+        old["schemaVersion"] = 2
+        for key in ["submittedIDs", "submittedThrough", "submittedState"] { old[key] = nil }
+        var restored = try HistoryRepository.decode(JSONSerialization.data(withJSONObject: old))
+        restored.ingest(created: [], deleted: [bolus("unsent", 1.5)])
+        restored.ingest(created: [bolus("unsent", 1.5, units: 2)])
+        restored.commit(now: at(2), timeZone: zone, settleDelay: 0)
+        XCTAssertTrue(restored.conflicts.isEmpty)
+        XCTAssertEqual(try DecodedIBF(self.file(&restored)).bolus, 2)
+        let before = restored.records
+        restored.ingest(created: [bolus("unsent", 0.5, units: 2)])
+        XCTAssertNotNil(restored.blockedReason(now: at(3)))
+        XCTAssertEqual(restored.records, before)
+    }
+
+    func testReverseOrderedReadbackFitsTheBackgroundExecutionBudget() throws {
+        let events = (0..<500).map { IBFHistoryEvent(index: UInt32($0 + 1), date: at(Double($0) / 12), record: .bolus(delivered: 1, immediateSeconds: 20)) }
+        let manifest = IngestionManifest(serial: 999000999, events: events, timeZone: zone, committedThrough: at(42))
+        let rows = events.reversed().map { event -> [String: Any] in
+            ["guid": "row-\(event.index)", "pumpGuid": "offline-pump", "softDeleted": false,
+             "pumpTimestamp": WallClock(timeZone: zone).string(event.date), "insulinDelivered": 1]
+        }
+        let start = Date()
+        let report = manifest.evaluate(pumps: [["serialNumber": "999000999", "guid": "offline-pump", "softDeleted": false]], rows: ["normal_boluses": rows])
+        XCTAssertTrue(report.confirmed)
+        XCTAssertEqual(report.matchedRecords, 500)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "Verification must leave time for networking and persistence within a background task")
+        XCTAssertFalse(manifest.evaluate(pumps: [["serialNumber": "999000999", "guid": "offline-pump", "softDeleted": false]], rows: ["normal_boluses": Array(rows.dropLast())]).confirmed)
+    }
+
     func testInterruptedBolusCannotAppendFutureTerminationAheadOfNextWindow() throws {
         var log = fresh()
         log.ingest(created: [basal("background", 0, 4),
