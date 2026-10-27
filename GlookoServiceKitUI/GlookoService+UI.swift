@@ -139,7 +139,7 @@ struct SignInView: View {
     @ObservedObject var model: SignInModel
     var body: some View {
         Form {
-            Section(footer: Text("Loop sends verified pump history to this account as a virtual Omnipod reporting device. Pump Simulator data is excluded. No therapy is changed.")) {
+            Section(footer: Text("Loop sends the insulin your pump delivered to this account as basal and bolus entries. Pump Simulator data is excluded. No therapy is changed.")) {
                 TextField("E-mail", text: $model.email).textContentType(.username).keyboardType(.emailAddress)
                     .autocapitalization(.none).disableAutocorrection(true).disabled(model.busy)
                     .accessibilityIdentifier("glooko-email")
@@ -150,8 +150,8 @@ struct SignInView: View {
                 Toggle("Remember password for session recovery", isOn: $model.rememberPassword).disabled(model.busy)
                     .accessibilityIdentifier("glooko-remember-password")
             }
-            Section(header: Text("Compatibility upload routes"), footer: Text("Insulin uses the virtual Insulet Omnipod compatibility format. Carb food entries are independent. This service does not upload glucose.")) {
-                Toggle("Insulin via virtual Omnipod format", isOn: $model.insulinEnabled).disabled(model.busy)
+            Section(header: Text("Uploads"), footer: Text("Insulin is sent as delivered basal and bolus entries with no medication named. Carb food entries are independent. This service does not upload glucose.")) {
+                Toggle("Upload insulin", isOn: $model.insulinEnabled).disabled(model.busy)
                 Toggle("Allow cellular data", isOn: $model.allowCellular).disabled(model.busy)
             }
             if model.askForStart {
@@ -211,10 +211,6 @@ struct SignInView: View {
             self?.refresh(); self?.uploading = false; self?.task = nil
         }
     }
-    func startNewPeriod() {
-        do { try service.startNewReportingPeriod(); recoveryError = nil; refresh() }
-        catch { recoveryError = String(describing: error) }
-    }
 }
 
 struct StatusView: View {
@@ -222,7 +218,6 @@ struct StatusView: View {
     @State private var confirmDelete = false
     @State private var confirmErase = false
     @State private var showDiagnostics = false
-    @State private var confirmNewPeriod = false
     private static let build: String = {
         let bundle = Bundle(for: GlookoServiceCoordinator.self)
         guard let url = bundle.url(forResource: "GlookoBuild", withExtension: "plist"),
@@ -244,22 +239,16 @@ struct StatusView: View {
     }
     var body: some View {
         Form {
-            Section(header: Text("Upload source"), footer: Text("Glooko's website may still display ‘Insulet Omnipod System’. The Loop source label is saved and verified separately.")) {
+            Section(header: Text("Upload source"), footer: Text("Glooko lists these as pump-delivered insulin. Entries sent before the switch from the Omnipod-format upload remain under ‘Insulet Omnipod System’.")) {
                 HStack(spacing: 12) {
                     Image("Loop", bundle: Bundle(for: GlookoServiceCoordinator.self))
                         .resizable().scaledToFit().frame(width: 44, height: 44)
                         .clipShape(RoundedRectangle(cornerRadius: 10)).accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(model.snapshot.summary.pumpUploadName ?? "Waiting for a real pump")
+                        Text(model.snapshot.summary.sourceName.map { "\($0) via Loop" } ?? "Waiting for a real pump")
                             .font(.headline).accessibilityIdentifier("glooko-pump-upload-source")
-                        Text(model.options.insulinEnabled ? "Insulin uploaded by Loop" : "Insulin uploads disabled").font(.subheadline).foregroundColor(.secondary)
+                        Text(model.options.insulinEnabled ? "Basal and bolus entries uploaded by Loop" : "Insulin uploads disabled").font(.subheadline).foregroundColor(.secondary)
                     }
-                }
-                row("Saved in Glooko", model.snapshot.status.pumpSourceLabel ?? "Waiting to verify")
-                    .accessibilityIdentifier("glooko-pump-source-label")
-                row("Label verified", text(model.snapshot.status.pumpSourceLabelVerifiedAt))
-                if let error = model.snapshot.status.pumpSourceLabelError {
-                    Text(error).foregroundColor(.orange).accessibilityIdentifier("glooko-pump-source-error")
                 }
             }
             Section(header: Text("Account")) {
@@ -280,20 +269,19 @@ struct StatusView: View {
                     Text("2 hours").tag(TimeInterval(7200)); Text("4 hours").tag(TimeInterval(14400))
                 }
             }
-            Section(header: Text("Compatibility upload routes"), footer: Text("Insulin uses a virtual Insulet Omnipod reporting device. Local queued insulin is retained when its upload is disabled. Carb foods are independent. Glucose is not uploaded by this service. Wi-Fi-only requests wait for Wi-Fi.")) {
-                Toggle("Insulin via virtual Omnipod format", isOn: Binding(get: { model.options.insulinEnabled }, set: { model.configure(insulin: $0) }))
+            Section(header: Text("Upload routes"), footer: Text("Insulin is sent as Glooko basal and bolus entries with no medication named. Local queued insulin is retained when its upload is disabled. Carb foods are independent. Glucose is not uploaded by this service. Wi-Fi-only requests wait for Wi-Fi.")) {
+                Toggle("Upload insulin", isOn: Binding(get: { model.options.insulinEnabled }, set: { model.configure(insulin: $0) })).accessibilityIdentifier("glooko-insulin-enabled")
                 Toggle("Allow cellular data", isOn: Binding(get: { model.options.allowCellular }, set: { model.configure(cellular: $0) }))
             }
-            Section(header: Text("Uploads"), footer: Text("Final history settles for one hour. Loop must finish reading its history before sending. Submission and confirmed Glooko records are tracked separately.")) {
-                row("Last submission", text(model.snapshot.status.lastUploadAt))
+            Section(header: Text("Insulin"), footer: Text("Each bolus is one entry. Basal is the insulin delivered in each clock hour, sent 15 minutes after the hour ends; Glooko does not receive the basal rate, temporary basals or suspensions. Later changes in Loop update or remove the same entries, and every entry is read back from Glooko.")) {
+                row("Last sent", text(model.snapshot.status.lastUploadAt))
                 row("Last confirmed", text(model.snapshot.status.lastConfirmedAt))
-                row("Confirmed through", text(model.snapshot.status.uploadedThrough))
-                row("History through", text(model.snapshot.summary.committedThrough))
-                row("Waiting to verify", model.snapshot.summary.hasUnuploadedRecords ? "Yes" : "No")
-                if model.snapshot.summary.correctedBasalIntervals > 0 {
-                    row("Corrected basal intervals", String(model.snapshot.summary.correctedBasalIntervals))
-                }
-                if let detail = model.snapshot.status.verificationDetail { Text(detail).foregroundColor(.secondary) }
+                row("Basal confirmed through", text(model.snapshot.status.uploadedThrough))
+                row("Basal ready through", text(model.snapshot.summary.committedThrough))
+                row("Entries waiting", String(model.snapshot.summary.pendingDoses)).accessibilityIdentifier("glooko-insulin-waiting")
+                row("Entries confirmed", String(model.snapshot.summary.records)).accessibilityIdentifier("glooko-insulin-confirmed")
+                row("Reporting from", text(model.snapshot.summary.historyStart))
+                if let detail = model.snapshot.status.verificationDetail { Text(detail).foregroundColor(.secondary).accessibilityIdentifier("glooko-insulin-detail") }
                 if let error = model.snapshot.status.lastError { Text(error).foregroundColor(.red).accessibilityIdentifier("glooko-error") }
                 Button(model.uploading ? "Uploading…" : "Upload now") { model.uploadNow() }
                     .disabled(model.uploading).accessibilityIdentifier("glooko-upload-now")
@@ -305,24 +293,6 @@ struct StatusView: View {
                 if let error = model.snapshot.status.carbError { Text(error).foregroundColor(.red) }
                 if let detail = model.snapshot.status.sourceReplayDetail { Text(detail).foregroundColor(.orange) }
                 Text("Find carb-only food entries in Glooko Graphs and History. Its Diet panel may remain empty for these entries.").foregroundColor(.secondary)
-            }
-            Section(header: Text("Glooko reports"), footer: Text("Device-record confirmation and Glooko's Summary are checked separately. Report differences do not change the source insulin quantities. Automatic bolus labels are preserved in Loop history; the current Glooko pump-file format cannot carry them.")) {
-                row("Last checked", text(model.snapshot.status.lastReportCheckedAt))
-                ForEach(model.snapshot.status.reportWarnings, id: \.self) { Text($0).foregroundColor(.orange) }
-                if let error = model.snapshot.status.reportError { Text(error).foregroundColor(.red) }
-            }
-            Section(header: Text("History")) {
-                row("History from", text(model.snapshot.summary.historyStart))
-                row("PDM serial", String(model.snapshot.summary.serial))
-                row("Records", String(model.snapshot.summary.records))
-                row("Doses awaiting finalisation", String(model.snapshot.summary.pendingDoses))
-                if model.snapshot.summary.lateDoses > 0 { row("Distinct late doses", String(model.snapshot.summary.lateDoses)) }
-                if model.snapshot.summary.conflictCount > 0 { row("Changes needing review", String(model.snapshot.summary.conflictCount)) }
-            }
-            if model.snapshot.summary.canStartNewPeriod && model.snapshot.status.lastError != nil {
-                Section(footer: Text("Reconnect to the pump first if a dose is still provisional. If the source changed or old records cannot be corrected, you can archive the saved history and continue from now. The archive remains on this phone; existing Glooko records are unchanged.")) {
-                    Button("Start a new reporting period") { confirmNewPeriod = true }
-                }
             }
             if let error = model.recoveryError { Text(error).foregroundColor(.red) }
             Section {
@@ -343,10 +313,6 @@ struct StatusView: View {
                 .accessibilityIdentifier("glooko-erase-local-data")
             Button("Cancel", role: .cancel) {}
         } message: { Text("This removes all locally saved Glooko upload history, archives, legacy backups, diagnostics and stored credentials from this app. It cannot be undone. Glooko's remote records and Loop's original source history are unchanged.") }
-        .alert("Start a new reporting period?", isPresented: $confirmNewPeriod) {
-            Button("Archive and start from now", role: .destructive) { model.startNewPeriod() }
-            Button("Cancel", role: .cancel) {}
-        } message: { Text("Unresolved history will be archived for review, not corrected in Glooko. Only delivery from now will enter the new reporting period.") }
     }
     private func row(_ title: String, _ value: String) -> some View {
         HStack(alignment: .top) { Text(title); Spacer(); Text(value).foregroundColor(.secondary).multilineTextAlignment(.trailing) }

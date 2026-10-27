@@ -140,7 +140,7 @@ public final class GlookoClient: @unchecked Sendable {
             req.setValue(cookie, forHTTPHeaderField: "Cookie")
         }
         try Task.checkCancellation()
-        let upload: GlookoRequestTrace.Upload? = method == "POST" && url.path == "/api/v3/device/file/upload" ? .insulin :
+        let upload: GlookoRequestTrace.Upload? = method == "PUT" && url.path == "/api/v2/insulins" ? .insulin :
             method == "PUT" && url.path == "/api/v2/foods" ? .carbs : nil
         let started = Date()
         let data: Data, response: URLResponse
