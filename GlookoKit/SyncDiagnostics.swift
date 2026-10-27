@@ -13,6 +13,8 @@ public struct GlookoDiagnosticEvent: Codable, Identifiable, Sendable {
 
 /// Request metadata only. No headers, bodies, credentials, query parameters or patient identifiers.
 public struct GlookoRequestTrace: Sendable {
+    public enum Upload: String, Sendable { case insulin, glucose, carbs }
+    public let upload: Upload?
     public let method: String
     public let route: String
     public let status: Int?

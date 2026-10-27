@@ -24,6 +24,35 @@ final class ProductionHistoryTests: XCTestCase {
         try XCTUnwrap(log.exportFile(timeZone: zone, settings: fixtureSettings())).data
     }
 
+    func testExportsRecentWholeDaysWithoutDroppingUnconfirmedHistory() throws {
+        var log = fresh()
+        log.ingest(created: [basal("first-ten-days", 0, 240)])
+        log.commit(now: at(240), timeZone: zone, settleDelay: 0)
+        let initial = try XCTUnwrap(log.exportFile(timeZone: zone, settings: fixtureSettings()))
+        log.markSubmitted(through: initial.lastIndex)
+        var unconfirmed = log
+        log.markVerified(fileIndex: initial.lastIndex, through: initial.lastIndex, at: at(240))
+        for backlog in [false, true] {
+            if backlog { unconfirmed.ingest(created: [basal("next", 240, 270), bolus("new", 253, units: 0.75)]); unconfirmed.commit(now: at(270), timeZone: zone, settleDelay: 0) }
+            else { log.ingest(created: [basal("next", 240, 270), bolus("new", 253, units: 0.75)]); log.commit(now: at(270), timeZone: zone, settleDelay: 0) }
+        }
+        let recent = try XCTUnwrap(log.exportFile(timeZone: zone, settings: fixtureSettings()))
+        let decoded = try DecodedIBF(recent.data)
+        XCTAssertEqual(decoded.events.map(\.date).min(), at(240), "Routine files start at a complete recent day")
+        XCTAssertEqual(decoded.bolus, 0.75)
+        XCTAssertLessThan(recent.data.count, initial.data.count)
+        XCTAssertEqual(log.records.first?.date, at(0), "Local retention is independent of the posted window")
+        let changedZone = try XCTUnwrap(log.exportFile(timeZone: TimeZone(secondsFromGMT: 3600)!, settings: fixtureSettings()))
+        XCTAssertEqual(try DecodedIBF(changedZone.data).events.map(\.date).min(), at(0), "A changed clock context uses the retained-file fallback")
+        let backlog = try XCTUnwrap(unconfirmed.exportFile(timeZone: zone, settings: fixtureSettings()))
+        XCTAssertEqual(try DecodedIBF(backlog.data).events.map(\.date).min(), at(0), "Unconfirmed older days must remain in the file")
+        // A verified prefix part way through the backlog still retains the first unconfirmed day.
+        let prefix = try XCTUnwrap(unconfirmed.records.last(where: { $0.date <= at(48) })).index
+        unconfirmed.markVerified(fileIndex: initial.lastIndex, through: prefix, at: at(270))
+        let partial = try XCTUnwrap(unconfirmed.exportFile(timeZone: zone, settings: fixtureSettings()))
+        XCTAssertLessThanOrEqual(try XCTUnwrap(DecodedIBF(partial.data).events.map(\.date).min()), at(72))
+    }
+
     func testUnsubmittedBackfillCorrectionsAndDeletionsRebuildInsteadOfDisappearing() throws {
         var log = fresh()
         log.ingest(created: [basal("basal", 0, 3)])

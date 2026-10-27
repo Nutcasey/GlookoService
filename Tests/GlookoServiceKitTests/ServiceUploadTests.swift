@@ -47,7 +47,7 @@ final class ServiceUploadTests: XCTestCase {
 
     private func signedIn() async throws -> GlookoService {
         let service = GlookoService(); services.append(service)
-        _ = try await service.signIn(email: "offline@example.test", password: "invented", historyStart: Date(timeIntervalSince1970: 0))
+        _ = try await service.signIn(email: "offline@example.test", password: "invented", historyStart: Date(timeIntervalSince1970: 0), rememberPassword: true, insulinEnabled: true, glucoseEnabled: true, allowCellular: true)
         return service
     }
 
@@ -69,6 +69,29 @@ final class ServiceUploadTests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         while !predicate(), Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertTrue(predicate(), "Expected the observable operation to finish before its deadline")
+    }
+
+    func testConcurrentStreamsShareOnePasswordRecoveryAndStopAfterCredentialRejection() async throws {
+        let service = try await signedIn()
+        OfflineGlooko.expireSessionAndRejectPassword()
+        OfflineGlooko.hold("POST /api/v3/users/sign_in")
+        try stage(carb(20), in: service)
+        try await eventually { OfflineGlooko.hasHeldRequest }
+        let device = HKDevice(name: "Offline sensor", manufacturer: "Dexcom", model: "G7", hardwareVersion: nil,
+                              firmwareVersion: nil, softwareVersion: nil, localIdentifier: nil, udiDeviceIdentifier: nil)
+        let sample = StoredGlucoseSample(syncIdentifier: "waiting-reading", startDate: start,
+            quantity: HKQuantity(unit: HKUnit(from: "mg/dL"), doubleValue: 100), device: device)
+        var staged: Result<Bool, Error>?
+        service.uploadGlucoseData([sample]) { staged = $0 }
+        _ = try XCTUnwrap(staged).get()
+        OfflineGlooko.release()
+        try await eventually { service.options.authenticationRequired != nil }
+        await service.uploadIfNeeded(force: true)
+        XCTAssertEqual(OfflineGlooko.signInCount, 2, "One interactive login and one shared recovery; no replay after rejection")
+        XCTAssertEqual(service.summary.pendingCarbs, 1)
+        XCTAssertEqual(service.diagnostics.pendingGlucose, 1)
+        XCTAssertEqual(OfflineGlooko.foodWriteCount, 0)
+        XCTAssertEqual(OfflineGlooko.glucoseFileWriteCount, 0)
     }
 
     func testAnEditDuringSubmissionIsDrainedAndReadbackUsesRecentUpdateTime() async throws {
@@ -203,9 +226,6 @@ final class ServiceUploadTests: XCTestCase {
     }
 
     func testGlucoseCallbackOwnsHistoryBeforeAcknowledgementAndNeedsBothStoredAndGraphReadback() async throws {
-        let previousTimeZone = NSTimeZone.default
-        NSTimeZone.default = TimeZone(secondsFromGMT: 0)!
-        defer { NSTimeZone.default = previousTimeZone }
         let service = try await signedIn()
         let parser = ISO8601DateFormatter(); parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let timestamp = try XCTUnwrap(parser.date(from: "2026-10-21T11:22:51.125Z"))
@@ -227,8 +247,10 @@ final class ServiceUploadTests: XCTestCase {
         OfflineGlooko.release()
         try await eventually { OfflineGlooko.uploadedFile != nil }
         let csv = String(decoding: try XCTUnwrap(OfflineGlooko.uploadedFile), as: UTF8.self)
-        XCTAssertTrue(csv.contains("21-10-2026 11:22,0,100.00,"))
-        XCTAssertTrue(csv.contains("21-10-2026 11:27,0,110.00,"))
+        let clock = DateFormatter(); clock.locale = Locale(identifier: "en_US_POSIX")
+        clock.timeZone = .current; clock.dateFormat = "dd-MM-yyyy HH:mm"
+        XCTAssertTrue(csv.contains("\(clock.string(from: timestamp)),0,100.00,"), csv)
+        XCTAssertTrue(csv.contains("\(clock.string(from: timestamp.addingTimeInterval(300))),0,110.00,"), csv)
         try await eventually { OfflineGlooko.glucoseReadCount > 0 }
         XCTAssertNil(service.rawState["lastGlucoseConfirmedAt"], "An accepted file and a stored record cannot confirm a missing graph value")
         OfflineGlooko.makeGlucoseGraphVisible()
@@ -243,7 +265,7 @@ final class ServiceUploadTests: XCTestCase {
 }
 
 private extension URLSessionConfiguration {
-    @objc class func glookoOfflineConfiguration() -> URLSessionConfiguration {
+    @objc dynamic class func glookoOfflineConfiguration() -> URLSessionConfiguration {
         let configuration = glookoOfflineConfiguration() // The original method after exchange.
         configuration.protocolClasses = [OfflineGlooko.self]
         return configuration
@@ -256,6 +278,8 @@ private final class OfflineGlooko: URLProtocol {
     private static var foods: [String: [String: Any]] = [:]
     private static var writes = 0
     private static var failWrite = false
+    private static var rejectCredentials = false
+    private static var signIns = 0
     private static var heldKey: String?
     private static var held: OfflineGlooko?
     private static var since: Date?
@@ -267,7 +291,9 @@ private final class OfflineGlooko: URLProtocol {
     private var stopped = false
     private static func access<T>(_ action: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return action() }
 
-    static func reset(accountID: String) { access { account = accountID; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; uploaded = nil; cancellations = 0; glucoseReads = 0; glucoseWrites = 0; glucoseGraphVisible = false } }
+    static func reset(accountID: String) { access { account = accountID; rejectCredentials = false; signIns = 0; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; uploaded = nil; cancellations = 0; glucoseReads = 0; glucoseWrites = 0; glucoseGraphVisible = false } }
+    static var signInCount: Int { access { signIns } }
+    static func expireSessionAndRejectPassword() { access { rejectCredentials = true } }
     static func hold(_ key: String) { access { heldKey = key } }
     static var hasHeldRequest: Bool { access { held != nil } }
     static var foodWriteCount: Int { access { writes } }
@@ -296,6 +322,11 @@ private final class OfflineGlooko: URLProtocol {
         while stream.hasBytesAvailable { let count = stream.read(&buffer, maxLength: buffer.count); if count <= 0 { break }; result.append(buffer, count: count) }
         return result
     }
+    private static func localTimestamp(_ utc: String) -> String {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current; formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:00.000'Z'"
+        return formatter.string(from: ISO8601DateFormatter().date(from: utc)!)
+    }
     private func reply() {
         guard !Self.access({ stopped }) else { return }
         let url = request.url!, path = url.path, data = body()
@@ -304,15 +335,16 @@ private final class OfflineGlooko: URLProtocol {
         date.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
         var headers = ["Content-Type": "application/json", "Date": date.string(from: Date())]
         Self.access {
-            if path.contains("sign_in") { headers["Set-Cookie"] = "_logbook-web_session=invented; Path=/; Secure" }
+            if path.contains("sign_in") { Self.signIns += 1; if Self.rejectCredentials { status = 401 } else { headers["Set-Cookie"] = "_logbook-web_session=invented; Path=/; Secure" } }
+            else if path == "/api/v2/users", Self.rejectCredentials { status = 401 }
             else if path == "/api/v2/users" { payload = ["users": [["guid": Self.account, "email": "offline@example.test", "softDeleted": false]]] }
             else if path == "/api/v3/session/users" { payload = ["currentUser": ["glookoCode": "offline"]] }
             else if path == "/api/v3/graph/data" {
-                let points: [[String: Any]] = Self.glucoseGraphVisible ? [["timestamp": "2026-10-21T11:22:00.000Z", "value": 10000], ["timestamp": "2026-10-21T11:27:00.000Z", "value": 11000]] : []
+                let points: [[String: Any]] = Self.glucoseGraphVisible ? [["timestamp": Self.localTimestamp("2026-10-21T11:22:00Z"), "value": 10000], ["timestamp": Self.localTimestamp("2026-10-21T11:27:00Z"), "value": 11000]] : []
                 payload = ["series": ["cgmHigh": [], "cgmNormal": points, "cgmLow": []]]
             } else if path == "/api/v2/cgm/egvs" {
                 Self.glucoseReads += 1
-                payload = ["egvs": [["guid": "offline-cgm-reading", "cgmDeviceGuid": "offline-cgm", "displayTime": "2026-10-21T11:22:00.000Z", "glucoseValue": 10000, "softDeleted": false], ["guid": "offline-app-reading", "cgmDeviceGuid": "offline-cgm", "displayTime": "2026-10-21T11:27:00.000Z", "glucoseValue": 11000, "softDeleted": false]]]
+                payload = ["egvs": [["guid": "offline-cgm-reading", "cgmDeviceGuid": "offline-cgm", "displayTime": Self.localTimestamp("2026-10-21T11:22:00Z"), "glucoseValue": 10000, "softDeleted": false], ["guid": "offline-app-reading", "cgmDeviceGuid": "offline-cgm", "displayTime": Self.localTimestamp("2026-10-21T11:27:00Z"), "glucoseValue": 11000, "softDeleted": false]]]
             }
             else if path == "/api/v2/foods", request.httpMethod == "PUT" {
                 Self.writes += 1

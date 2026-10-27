@@ -42,6 +42,18 @@ public struct HistoryRepository {
         }
     }
 
+    /// User-requested removal covers every account, archive and legacy backup in this plugin's directory.
+    /// Returns existing account storage keys so the caller can remove their corresponding credentials too.
+    public func localAccountStorageKeys() throws -> [String] {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+        return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .map(\.lastPathComponent).filter { $0.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil }
+    }
+    public func eraseAllLocalData() throws {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        try FileManager.default.removeItem(at: directory)
+    }
+
     private var legacyURL: URL { directory.appendingPathComponent("pump-history.json") }
     private func url(accountID: String) -> URL {
         directory.appendingPathComponent(GlookoAccount(id: accountID, email: "").storageKey, isDirectory: true)

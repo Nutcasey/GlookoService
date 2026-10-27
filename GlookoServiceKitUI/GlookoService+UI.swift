@@ -33,13 +33,13 @@ final class GlookoServiceCoordinator: UINavigationController, ServiceOnboarding,
     }
 
     private func signInController(isSetup: Bool) -> UIViewController {
-        let model = SignInModel(email: service?.email ?? "", askForStart: isSetup)
-        model.signIn = { [weak self, weak model] email, password, historyStart in
+        let model = SignInModel(email: service?.email ?? "", askForStart: isSetup, options: service?.options)
+        model.signIn = { [weak self, weak model] email, password, historyStart, remember, insulin, glucose, cellular in
             guard let self else { throw CancellationError() }
             self.signInCancelled = false
             let candidate = self.service ?? GlookoService()
             self.pendingService = candidate
-            _ = try await candidate.signIn(email: email, password: password, historyStart: historyStart)
+            _ = try await candidate.signIn(email: email, password: password, historyStart: historyStart, rememberPassword: remember, insulinEnabled: insulin, glucoseEnabled: glucose, allowCellular: cellular)
             try Task.checkCancellation()
             guard !self.signInCancelled else { throw CancellationError() }
             model?.finished = true
@@ -71,9 +71,9 @@ final class GlookoServiceCoordinator: UINavigationController, ServiceOnboarding,
             guard let self else { return }
             self.setViewControllers([self.signInController(isSetup: false)], animated: true)
         }
-        model.delete = { [weak self] in
+        model.delete = { [weak self] erase in
             guard let self else { return }
-            self.service?.completeDelete()
+            try self.service?.removeService(eraseLocalData: erase)
             self.completionDelegate?.completionNotifyingDidComplete(self)
         }
         model.done = { [weak self] in
@@ -92,13 +92,21 @@ final class GlookoServiceCoordinator: UINavigationController, ServiceOnboarding,
     @Published var busy = false
     @Published var error: String?
     @Published var historyStart = Date()
+    @Published var rememberPassword = false
+    @Published var insulinEnabled = false
+    @Published var glucoseEnabled = false
+    @Published var allowCellular = false
     let askForStart: Bool
-    var signIn: @MainActor (String, String, Date?) async throws -> Void = { _, _, _ in }
+    var signIn: @MainActor (String, String, Date?, Bool, Bool, Bool, Bool) async throws -> Void = { _, _, _, _, _, _, _ in }
     var cancelled: () -> Void = {}
     private var task: Task<Void, Never>?
     var finished = false
 
-    init(email: String, askForStart: Bool) { self.email = email; self.askForStart = askForStart }
+    init(email: String, askForStart: Bool, options: GlookoService.Options?) {
+        self.email = email; self.askForStart = askForStart
+        rememberPassword = options?.rememberPassword ?? false; insulinEnabled = options?.insulinEnabled ?? false
+        glucoseEnabled = options?.glucoseEnabled ?? false; allowCellular = options?.allowCellular ?? false
+    }
 
     func submit() {
         guard !busy else { return }
@@ -108,9 +116,10 @@ final class GlookoServiceCoordinator: UINavigationController, ServiceOnboarding,
         let email = self.email.trimmingCharacters(in: .whitespacesAndNewlines)
         let secret = password
         let start = askForStart ? historyStart : nil
+        let remember = rememberPassword, insulin = insulinEnabled, glucose = glucoseEnabled, cellular = allowCellular
         password = ""
         task = Task { [weak self] in
-            do { try await action(email, secret, start) }
+            do { try await action(email, secret, start, remember, insulin, glucose, cellular) }
             catch { if !Task.isCancelled { self?.error = String(describing: error) } }
             self?.busy = false
             self?.task = nil
@@ -138,8 +147,17 @@ struct SignInView: View {
                 SecureField("Password", text: $model.password).textContentType(.password).disabled(model.busy)
                     .accessibilityIdentifier("glooko-password")
             }
+            Section(footer: Text("By default only the session is saved. If you enable password recovery, the password is retrievable by this app from this device's Keychain and may be sent again when the session expires. Glooko OAuth requires a separately registered application.")) {
+                Toggle("Remember password for session recovery", isOn: $model.rememberPassword).disabled(model.busy)
+                    .accessibilityIdentifier("glooko-remember-password")
+            }
+            Section(header: Text("Compatibility upload routes"), footer: Text("These are manufacturer-specific compatibility formats, not a native Loop integration. Insulin is presented to Glooko as an Insulet Omnipod PDM; glucose as Abbott LibreView CSV. Carb food entries do not require either device identity. Enable only the routes you accept.")) {
+                Toggle("Insulin via virtual Omnipod format", isOn: $model.insulinEnabled).disabled(model.busy)
+                Toggle("Glucose via LibreView CSV", isOn: $model.glucoseEnabled).disabled(model.busy)
+                Toggle("Allow cellular data", isOn: $model.allowCellular).disabled(model.busy)
+            }
             if model.askForStart {
-                Section(footer: Text("For a new account history, choose when the current real pod was activated. Previously saved history for this account resumes from its existing start.")) {
+                Section(footer: Text("Choose when reporting should begin within the history Loop can supply. Previously saved history for this account resumes from its existing start.")) {
                     DatePicker("Send history from", selection: $model.historyStart, in: Date().addingTimeInterval(-7 * 86400)...Date())
                         .disabled(model.busy).accessibilityIdentifier("glooko-history-start")
                 }
@@ -158,21 +176,34 @@ struct SignInView: View {
 @MainActor final class StatusModel: ObservableObject {
     let service: GlookoService
     @Published var snapshot: GlookoService.Snapshot
+    @Published var options: GlookoService.Options
     @Published var uploading = false
     @Published var recoveryError: String?
     var signInAgain: () -> Void = {}
-    var delete: () -> Void = {}
+    var delete: (Bool) throws -> Void = { _ in }
     var done: () -> Void = {}
     private var subscription: AnyCancellable?
     private var task: Task<Void, Never>?
 
     init(service: GlookoService) {
         self.service = service
-        snapshot = service.snapshot
+        snapshot = service.snapshot; options = service.options
         subscription = NotificationCenter.default.publisher(for: GlookoService.stateDidChange, object: service)
             .receive(on: RunLoop.main).sink { [weak self] _ in self?.refresh() }
     }
-    func refresh() { snapshot = service.snapshot }
+    func refresh() { snapshot = service.snapshot; options = service.options }
+    func configure(insulin: Bool? = nil, glucose: Bool? = nil, cellular: Bool? = nil) {
+        service.configureUploads(insulin: insulin ?? options.insulinEnabled, glucose: glucose ?? options.glucoseEnabled,
+            cellular: cellular ?? options.allowCellular); refresh()
+    }
+    func forgetPassword() {
+        do { try service.stopRememberingPassword(); recoveryError = nil; refresh() }
+        catch { recoveryError = "Could not remove the stored password: \(error)" }
+    }
+    func remove(erase: Bool) {
+        do { try delete(erase); recoveryError = nil }
+        catch { recoveryError = "Could not finish removing the service: \(error)"; refresh() }
+    }
     func uploadNow() {
         guard !uploading else { return }
         uploading = true
@@ -191,6 +222,7 @@ struct SignInView: View {
 struct StatusView: View {
     @ObservedObject var model: StatusModel
     @State private var confirmDelete = false
+    @State private var confirmErase = false
     @State private var showDiagnostics = false
     @State private var confirmNewPeriod = false
     private static let build: String = {
@@ -222,7 +254,7 @@ struct StatusView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(model.snapshot.summary.pumpUploadName ?? "Waiting for a real pump")
                             .font(.headline).accessibilityIdentifier("glooko-pump-upload-source")
-                        Text("Insulin uploaded by Loop").font(.subheadline).foregroundColor(.secondary)
+                        Text(model.options.insulinEnabled ? "Insulin uploaded by Loop" : "Insulin uploads disabled").font(.subheadline).foregroundColor(.secondary)
                     }
                 }
                 row("Saved in Glooko", model.snapshot.status.pumpSourceLabel ?? "Waiting to verify")
@@ -238,6 +270,22 @@ struct StatusView: View {
                 Button { showDiagnostics = true } label: {
                     Label("Diagnostics and live check", systemImage: "list.bullet.rectangle")
                 }.accessibilityIdentifier("glooko-diagnostics")
+            }
+            Section(header: Text("Authentication and alerts")) {
+                row("Password recovery", model.options.rememberPassword ? "Enabled on this device" : "Sign in when the session expires")
+                if let reason = model.options.authenticationRequired { Text(reason).foregroundColor(.red) }
+                if model.options.rememberPassword { Button("Forget stored password") { model.forgetPassword() } }
+                Button("Change sign-in settings") { model.signInAgain() }
+                Button("Send test alert") { model.service.sendTestAlert() }.accessibilityIdentifier("glooko-test-alert")
+                Picker("Alert when eligible data waits", selection: Binding(get: { model.options.alertThreshold }, set: { model.service.setAlertThreshold($0); model.refresh() })) {
+                    Text("30 minutes").tag(TimeInterval(1800)); Text("1 hour").tag(TimeInterval(3600))
+                    Text("2 hours").tag(TimeInterval(7200)); Text("4 hours").tag(TimeInterval(14400))
+                }
+            }
+            Section(header: Text("Compatibility upload routes"), footer: Text("Glooko identifies these as Insulet Omnipod and Abbott LibreView CSV, not as a native Loop device. Local queued history is retained when a route is disabled. Carb food uploads are independent. Wi-Fi-only requests may wait until Wi-Fi is available.")) {
+                Toggle("Insulin via virtual Omnipod format", isOn: Binding(get: { model.options.insulinEnabled }, set: { model.configure(insulin: $0) }))
+                Toggle("Glucose via LibreView CSV", isOn: Binding(get: { model.options.glucoseEnabled }, set: { model.configure(glucose: $0) }))
+                Toggle("Allow cellular data", isOn: Binding(get: { model.options.allowCellular }, set: { model.configure(cellular: $0) }))
             }
             Section(header: Text("Uploads"), footer: Text("Final history settles for one hour. Loop must finish reading its history before sending. Submission and confirmed Glooko records are tracked separately.")) {
                 row("Last submission", text(model.snapshot.status.lastUploadAt))
@@ -260,7 +308,7 @@ struct StatusView: View {
                 if let error = model.snapshot.status.carbError { Text(error).foregroundColor(.red) }
                 Text("Find carb-only food entries in Glooko Graphs and History. Its Diet panel may remain empty for these entries.").foregroundColor(.secondary)
             }
-            Section(header: Text("Glucose"), footer: Text("Numeric Dexcom G7 readings from Loop are sent through Glooko's CSV importer. Glooko lists this as a LibreView CSV reporting source, with minute-resolution timestamps. Original sensor timestamps stay on this phone. Existing matching readings are not uploaded twice.")) {
+            Section(header: Text("Glucose"), footer: Text("Numeric Dexcom G7 readings from Loop are sent through Glooko's CSV importer. Glooko lists this as a LibreView CSV reporting source, with minute-resolution timestamps. Original sensor timestamps stay on this phone. History comes only from the glucose stream Loop supplies. Existing matching readings are not uploaded twice.")) {
                 row("Last confirmed", text(model.snapshot.status.lastGlucoseConfirmedAt))
                 row("Confirmed through minute", text(model.snapshot.status.glucoseThrough))
                 row("Waiting to send", String(model.snapshot.summary.pendingGlucose))
@@ -297,9 +345,15 @@ struct StatusView: View {
         .sheet(isPresented: $showDiagnostics) { DiagnosticsView(service: model.service, build: Self.build) }
         .toolbar { Button("Done") { model.done() } }
         .alert("Delete the Glooko service?", isPresented: $confirmDelete) {
-            Button("Delete", role: .destructive) { model.delete() }
+            Button("Disconnect and keep history", role: .destructive) { model.remove(erase: false) }
+            Button("Erase local data and remove", role: .destructive) { confirmErase = true }
             Button("Cancel", role: .cancel) {}
-        } message: { Text("Uploads stop. This account's saved history stays on the phone for reconnection. Data already in Glooko stays there.") }
+        } message: { Text("Choose whether to keep this service's local history for reconnection or erase all locally saved Glooko history, archives and diagnostics. Data already in Glooko is unchanged.") }
+        .alert("Erase all local Glooko data?", isPresented: $confirmErase) {
+            Button("Erase local data and remove", role: .destructive) { model.remove(erase: true) }
+                .accessibilityIdentifier("glooko-erase-local-data")
+            Button("Cancel", role: .cancel) {}
+        } message: { Text("This removes all locally saved Glooko pump, glucose and carb history, archives, legacy backups, diagnostics and stored credentials from this app. It cannot be undone. Glooko's remote records and Loop's original source history are unchanged.") }
         .alert("Start a new reporting period?", isPresented: $confirmNewPeriod) {
             Button("Archive and start from now", role: .destructive) { model.startNewPeriod() }
             Button("Cancel", role: .cancel) {}
