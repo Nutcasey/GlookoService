@@ -37,7 +37,7 @@ public struct HistoryConflict: Codable, Equatable, Sendable {
 
 /// Durable responsibility for source doses, immutable submitted indices and explicit source conflicts.
 public struct PumpHistoryLog: Codable, Equatable, Sendable {
-    public var schemaVersion = 3
+    public var schemaVersion = 4
     public var ownerID: String?
     public var ownerEmail: String?
     public var sourceID: String?
@@ -66,9 +66,14 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
     private var submittedThrough: Date?
     private var submittedState: DeliveryTimeline.State?
     private var submittedIDs: Set<String>?
-    /// Highest submitted file whose eligible final clinical records have passed readback verification.
+    /// Highest contiguous native prefix verified by readback; deferred intervals remain protected from pruning.
     public var lastUploadedIndex: UInt32?
+    /// A file may have passed verification of its final rows while its newest interval is deferred.
+    public private(set) var lastVerifiedFileIndex: UInt32?
     public var historyStart: Date?
+    /// Native marker repairs change only the exported view; original submitted records remain here.
+    public private(set) var repairedBasalIndices: Set<UInt32> = []
+    public private(set) var ingestionCorrections: [String: IngestionCorrection] = [:]
     public var lateDoses: Int { legacyLateDoses + droppedIDs.count }
 
     public init(serial: UInt32, powerUp: Date, podLot: UInt16, podSerial: UInt16, firstIndex: UInt32 = 1) {
@@ -83,7 +88,7 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
     }
 
     public var hasUnuploadedRecords: Bool {
-        records.last.map { $0.index > (lastUploadedIndex ?? 0) } ?? false
+        records.last.map { $0.index > max(lastUploadedIndex ?? 0, lastVerifiedFileIndex ?? 0) } ?? false
     }
 
     /// Own the source callback durably before its settings/source stream has caught up.
@@ -223,6 +228,9 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
         for dose in pending.values where dose.isMutable || (dose.kind == .bolus && dose.end > horizon) {
             horizon = min(horizon, dose.start)
         }
+        // Source caps retain fractions; native delivery boundaries represent whole seconds only.
+        // Keep the remainder pending instead of inventing a suspension at the end of this window.
+        horizon = Date(timeIntervalSince1970: floor(horizon.timeIntervalSince1970))
         let start = committedThrough ?? pending.values.map(\.start).min()
         guard let start, horizon > start else { return 0 }
         var intervals: [DeliveryTimeline.Interval] = []
@@ -353,6 +361,7 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
         guard hasUnuploadedRecords, let committedThrough else { return nil }
         guard let settings else { throw PumpHistoryIBF.EncodingError.missingSettings }
         try settings.validate()
+        repairedBasalIndices.formUnion(Self.repairZeroDurationMarkers(records).indices)
         if case .download? = records.last?.record {} else {
             records.append(event(max(committedThrough, records.last?.date ?? committedThrough), .download, timeZone))
         }
@@ -377,18 +386,60 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
     }
 
     public var exportedEvents: [IBFHistoryEvent] {
-        var events = records
+        var events = Self.repairZeroDurationMarkers(records).events
         if state?.isDelivering == true, let i = events.lastIndex(where: { if case .basal = $0.record { return true }; return false }) {
             events[i].inProgress = true
         }
         return events
     }
 
+    /// Glooko turns a zero-second suspend/resume into a zero scheduled rate. Inert markers preserve
+    /// every date, index and clinical payload while the original submitted records remain on disk.
+    private static func repairZeroDurationMarkers(_ original: [IBFHistoryEvent]) -> (events: [IBFHistoryEvent], indices: Set<UInt32>) {
+        var events = original, indices = Set<UInt32>()
+        var suspension: Int?, resume: Int?
+        for i in original.indices {
+            switch original[i].record {
+            case .suspend: suspension = i; resume = nil
+            case .resume: resume = i
+            case let .basal(rate, minutes):
+                if minutes == 0, rate > 0, let start = suspension, let end = resume,
+                   floor(original[start].date.timeIntervalSince1970) == floor(original[end].date.timeIntervalSince1970),
+                   floor(original[end].date.timeIntervalSince1970) == floor(original[i].date.timeIntervalSince1970),
+                   original[start].utcOffset == original[end].utcOffset, original[end].utcOffset == original[i].utcOffset {
+                    events[start].record = .download; events[end].record = .download
+                    indices.insert(original[i].index)
+                }
+                suspension = nil; resume = nil
+            case .activate, .deactivate: suspension = nil; resume = nil
+            default: break
+            }
+        }
+        return (events, indices)
+    }
+
+    public mutating func recordCorrectionIntent(_ correction: IngestionCorrection) {
+        // Preserve the first before-image when a write succeeds but its acknowledgement is lost.
+        if ingestionCorrections[correction.guid] == nil { ingestionCorrections[correction.guid] = correction }
+    }
+
+    public mutating func confirmCorrections(through index: UInt32, at date: Date) {
+        for key in Array(ingestionCorrections.keys) where ingestionCorrections[key]!.index <= index && ingestionCorrections[key]!.confirmedAt == nil {
+            ingestionCorrections[key]!.confirmedAt = date
+        }
+    }
+
+    public mutating func markVerified(fileIndex: UInt32, through index: UInt32, at date: Date) {
+        lastUploadedIndex = max(lastUploadedIndex ?? 0, min(index, fileIndex))
+        lastVerifiedFileIndex = max(lastVerifiedFileIndex ?? 0, fileIndex)
+        confirmCorrections(through: index, at: date)
+    }
+
     public enum HistoryError: Error { case conflictsRequireReview }
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, ownerID, ownerEmail, sourceID, reportingContextData, serial, powerUp, podLot, podSerial, nextIndex, records, committedThrough
-        case state, pending, committed, sourceDoses, conflicts, unclassified, stagedDeletions, droppedIDs, legacyIDs, legacyLateDoses, lateDoses, lastSubmittedIndex, lastUploadedIndex, historyStart, submittedThrough, submittedState, submittedIDs
+        case state, pending, committed, sourceDoses, conflicts, unclassified, stagedDeletions, droppedIDs, legacyIDs, legacyLateDoses, lateDoses, lastSubmittedIndex, lastUploadedIndex, lastVerifiedFileIndex, historyStart, submittedThrough, submittedState, submittedIDs, repairedBasalIndices, ingestionCorrections
     }
 
     public init(from decoder: Decoder) throws {
@@ -416,15 +467,22 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
         submittedState = try c.decodeIfPresent(DeliveryTimeline.State.self, forKey: .submittedState)
         submittedIDs = try c.decodeIfPresent(Set<String>.self, forKey: .submittedIDs)
         lastUploadedIndex = (try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1) >= 2 ? previousIndex : nil
+        lastVerifiedFileIndex = try c.decodeIfPresent(UInt32.self, forKey: .lastVerifiedFileIndex) ?? lastUploadedIndex
         let version = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         legacyIDs = try c.decodeIfPresent(Set<String>.self, forKey: .legacyIDs) ?? (version == 1 ? Set(committed.keys).union(pending.keys) : [])
-        guard version <= 3, nextIndex > (records.last?.index ?? 0) else { throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: c, debugDescription: "Unsupported or inconsistent history") }
+        repairedBasalIndices = try c.decodeIfPresent(Set<UInt32>.self, forKey: .repairedBasalIndices) ?? []
+        repairedBasalIndices.formUnion(Self.repairZeroDurationMarkers(records).indices)
+        ingestionCorrections = try c.decodeIfPresent([String: IngestionCorrection].self, forKey: .ingestionCorrections) ?? [:]
+        guard version <= 4, nextIndex > (records.last?.index ?? 0) else { throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: c, debugDescription: "Unsupported or inconsistent history") }
+        if version < 4, repairedBasalIndices.contains(where: { $0 <= (lastUploadedIndex ?? 0) }) {
+            lastUploadedIndex = nil; lastVerifiedFileIndex = nil
+        }
         captureSubmissionCheckpoint()
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(3, forKey: .schemaVersion); try c.encodeIfPresent(ownerID, forKey: .ownerID); try c.encodeIfPresent(sourceID, forKey: .sourceID)
+        try c.encode(4, forKey: .schemaVersion); try c.encodeIfPresent(ownerID, forKey: .ownerID); try c.encodeIfPresent(sourceID, forKey: .sourceID)
         try c.encodeIfPresent(ownerEmail, forKey: .ownerEmail)
         try c.encodeIfPresent(reportingContextData, forKey: .reportingContextData)
         try c.encode(serial, forKey: .serial); try c.encode(powerUp, forKey: .powerUp); try c.encode(podLot, forKey: .podLot); try c.encode(podSerial, forKey: .podSerial)
@@ -434,8 +492,11 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
         try c.encode(unclassified, forKey: .unclassified); try c.encode(stagedDeletions, forKey: .stagedDeletions); try c.encode(legacyIDs, forKey: .legacyIDs)
         try c.encode(legacyLateDoses, forKey: .legacyLateDoses); try c.encode(lateDoses, forKey: .lateDoses)
         try c.encodeIfPresent(lastSubmittedIndex, forKey: .lastSubmittedIndex); try c.encodeIfPresent(lastUploadedIndex, forKey: .lastUploadedIndex)
+        try c.encodeIfPresent(lastVerifiedFileIndex, forKey: .lastVerifiedFileIndex)
         try c.encodeIfPresent(submittedThrough, forKey: .submittedThrough); try c.encodeIfPresent(submittedState, forKey: .submittedState)
         try c.encodeIfPresent(submittedIDs, forKey: .submittedIDs)
         try c.encodeIfPresent(historyStart, forKey: .historyStart)
+        try c.encode(repairedBasalIndices, forKey: .repairedBasalIndices)
+        try c.encode(ingestionCorrections, forKey: .ingestionCorrections)
     }
 }

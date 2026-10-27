@@ -6,6 +6,9 @@ public struct IngestionReport: Sendable {
     public var missingRecords: Int
     public var confirmedThrough: Date?
     public var detail: String
+    public var mismatchedRecords: Int = 0
+    public var duplicateRecords: Int = 0
+    public var deferredRecords: Int = 0
 }
 
 /// A manifest of final clinical records. Submission receipts and pump metadata alone cannot satisfy it.
@@ -22,16 +25,23 @@ public struct IngestionManifest: Sendable {
     public let records: [Expected]
     public let through: Date?
     public let earliestDate: Date?
+    public let deferredRecords: Int
+    public let repairedBasalIndices: Set<UInt32>
+    public let verifiedThroughIndex: UInt32
 
-    public init(serial: UInt32, events: [IBFHistoryEvent], timeZone: TimeZone, committedThrough: Date?) {
+    public init(serial: UInt32, events: [IBFHistoryEvent], timeZone: TimeZone, committedThrough: Date?, repairedBasalIndices: Set<UInt32> = []) {
         self.serial = serial
         earliestDate = events.first?.date
         let lastDelivery = events.last { event in
             switch event.record { case .basal, .suspend, .deactivate: return true; default: return false }
         }
-        if let lastDelivery, case .deactivate = lastDelivery.record { through = committedThrough }
-        else { through = lastDelivery?.date ?? committedThrough }
+        var finalThrough: Date?
+        if let lastDelivery, case .deactivate = lastDelivery.record { finalThrough = committedThrough }
+        else { finalThrough = lastDelivery?.date ?? committedThrough }
         var expected: [Expected] = []
+        var deferred = 0
+        var finalIndex = events.last?.index ?? 0
+        if let open = events.first(where: \.inProgress) { finalIndex = open.index > 0 ? open.index - 1 : 0 }
         var followingDelivery: [Int: IBFHistoryEvent] = [:]
         var nextDelivery: IBFHistoryEvent?
         for i in events.indices.reversed() {
@@ -48,6 +58,12 @@ public struct IngestionManifest: Sendable {
                                       duration: nil, rate: nil, units: (units * 100).rounded() / 100))
             case let .basal(rate, minutes):
                 guard let next else { continue }
+                // Glooko does not finalise the interval ending at an IN_PROGRESS basal until a
+                // later transition. Its timestamp is a boundary, not evidence of final ingestion.
+                if next.inProgress {
+                    deferred += 1; finalThrough = min(finalThrough ?? event.date, event.date)
+                    finalIndex = min(finalIndex, event.index > 0 ? event.index - 1 : 0); continue
+                }
                 let duration = Int(floor(next.date.timeIntervalSince1970) - floor(event.date.timeIntervalSince1970))
                 guard duration > 0 else { continue }
                 expected.append(.init(index: event.index, resource: minutes == 0 ? "scheduled_basals" : "temporary_basals",
@@ -55,6 +71,10 @@ public struct IngestionManifest: Sendable {
                                       rate: (rate * 100).rounded() / 100, units: nil))
             case .suspend:
                 guard let next else { continue }
+                if next.inProgress {
+                    deferred += 1; finalThrough = min(finalThrough ?? event.date, event.date)
+                    finalIndex = min(finalIndex, event.index > 0 ? event.index - 1 : 0); continue
+                }
                 let duration = Int(floor(next.date.timeIntervalSince1970) - floor(event.date.timeIntervalSince1970))
                 guard duration > 0 else { continue }
                 expected.append(.init(index: event.index, resource: "suspend_basals", timestamp: timestamp,
@@ -63,6 +83,10 @@ public struct IngestionManifest: Sendable {
             }
         }
         records = expected
+        through = finalThrough.map { Date(timeIntervalSince1970: floor($0.timeIntervalSince1970)) }
+        deferredRecords = deferred
+        verifiedThroughIndex = finalIndex
+        self.repairedBasalIndices = repairedBasalIndices.intersection(Set(expected.map(\.index)))
     }
 
     /// Public so offline tools can reconcile a captured response using the exact production contract.
@@ -76,7 +100,7 @@ public struct IngestionManifest: Sendable {
         }
         guard !records.isEmpty else {
             return .init(confirmed: false, matchedRecords: 0, missingRecords: 0, confirmedThrough: nil,
-                         detail: "Waiting for the first final clinical record")
+                         detail: "Waiting for the first final clinical record", deferredRecords: deferredRecords)
         }
         let fractional = ISO8601DateFormatter(); fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let whole = ISO8601DateFormatter()
@@ -99,11 +123,14 @@ public struct IngestionManifest: Sendable {
                     .append(Candidate(guid: guid, time: time, row: row))
             }
         }
-        var used = Set<String>()
+        struct Key: Hashable { var resource: String; var time: Int64 }
+        var used = Set<String>(), expectedCounts: [Key: Int] = [:], matchedCounts: [Key: Int] = [:]
         var matched = 0
         for expected in records {
             guard let time = timestamp(expected.timestamp) else { continue }
             let key = Int64((time * 1000).rounded())
+            let group = Key(resource: expected.resource, time: key)
+            expectedCounts[group, default: 0] += 1
             // Adjacent buckets preserve the original sub-millisecond tolerance at rounding boundaries.
             let candidates = (-1...1).flatMap { indexed[expected.resource]?[key + Int64($0)] ?? [] }
             let match = candidates.first { candidate in
@@ -114,12 +141,29 @@ public struct IngestionManifest: Sendable {
                 if let units = expected.units, abs(((row["insulinDelivered"] as? NSNumber)?.doubleValue ?? -.infinity) - units) > 0.00001 { return false }
                 return true
             }
-            if let match { used.insert(match.guid); matched += 1 }
+            if let match { used.insert(match.guid); matched += 1; matchedCounts[group, default: 0] += 1 }
+        }
+        var mismatched = 0, duplicates = 0
+        for (key, count) in expectedCounts {
+            var candidates: [Candidate] = []
+            for offset in -1...1 { candidates += indexed[key.resource]?[key.time + Int64(offset)] ?? [] }
+            let eligible = candidates.filter { abs($0.time - Double(key.time) / 1000) < 0.001 }
+            let unused = Set(eligible.map { $0.guid }).subtracting(used).count
+            let unmatched = count - (matchedCounts[key] ?? 0)
+            mismatched += min(unused, unmatched)
+            duplicates += max(0, unused - unmatched)
         }
         let missing = records.count - matched
-        return .init(confirmed: missing == 0, matchedRecords: matched, missingRecords: missing,
-                     confirmedThrough: missing == 0 ? through : nil,
-                     detail: missing == 0 ? "Final records verified in Glooko" : "Waiting for Glooko to finalise \(missing) clinical record(s)")
+        let confirmed = missing == 0 && duplicates == 0
+        var details: [String] = []
+        if confirmed { details.append("Final records verified in Glooko") }
+        if mismatched > 0 { details.append("\(mismatched) Glooko record(s) differ from the saved history") }
+        if duplicates > 0 { details.append("\(duplicates) duplicate Glooko record(s) need review") }
+        if missing > mismatched { details.append("Waiting for Glooko to ingest \(missing - mismatched) final record(s)") }
+        if deferredRecords > 0 { details.append("\(deferredRecords) recent interval(s) await later pump history") }
+        return .init(confirmed: confirmed, matchedRecords: matched, missingRecords: missing,
+                     confirmedThrough: confirmed ? through : nil, detail: details.joined(separator: ". "),
+                     mismatchedRecords: mismatched, duplicateRecords: duplicates, deferredRecords: deferredRecords)
     }
 
 }

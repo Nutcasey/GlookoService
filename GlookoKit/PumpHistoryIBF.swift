@@ -339,15 +339,17 @@ public enum DeliveryTimeline {
     /// pair to a UTC hour so the intermediate deviation also stays below 0.0025 U. IDs and split times
     /// depend on the whole source interval, so continuation remains stable across commitment windows.
     private static func quantised(_ interval: Interval) -> [Interval] {
-        let rate: Double
-        switch interval.delivery {
-        case .suspended: return [interval]
-        case let .scheduled(value), let .temporary(value): rate = value
-        }
-        guard rate.isFinite, rate >= 0, rate < 65535 else { return [interval] }
         let start = floor(interval.start.timeIntervalSince1970)
         let end = floor(interval.end.timeIntervalSince1970)
         guard end > start else { return [] }
+        let rate: Double
+        switch interval.delivery {
+        case .suspended:
+            return [Interval(start: Date(timeIntervalSince1970: start), end: Date(timeIntervalSince1970: end),
+                             delivery: .suspended, id: interval.id)]
+        case let .scheduled(value), let .temporary(value): rate = value
+        }
+        guard rate.isFinite, rate >= 0, rate < 65535 else { return [interval] }
         let adjusted = rate * interval.end.timeIntervalSince(interval.start) / (end - start)
         let low = floor(adjusted * 100 + 1e-9) / 100
         let fraction = max(0, min(1, (adjusted - low) * 100))
