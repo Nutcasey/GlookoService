@@ -8,7 +8,7 @@ public final class GlookoService: Service {
     public static let pluginIdentifier = "GlookoService"
     public static let localizedTitle = "Glooko"
     public static let stateDidChange = Notification.Name("GlookoServiceStateDidChange")
-    public weak var serviceDelegate: ServiceDelegate?
+    public weak var serviceDelegate: ServiceDelegate? { didSet { changed() } }
     public weak var stateDelegate: StatefulPluggableDelegate?
 
     public struct Status: Equatable {
@@ -89,23 +89,32 @@ public final class GlookoService: Service {
     private var carbRetryID: UUID?
     private var carbWakeRequested = false
     private var carbRetryDelay: TimeInterval = 30
-    private var carbAnchorReset = false
     private var carbIdentityVersion = 1
     private var glucose: GlucoseOutbox?
     private var glucoseStorageError: String?
     private var glucoseStorageCreated = false
-    private var glucoseAnchorReset = false
     private var glucoseTask: Task<Void, Never>?
     private var glucoseTaskID: UUID?
     private var glucoseRetryTask: Task<Void, Never>?
     private var glucoseRetryID: UUID?
     private var glucoseRetryDelay: TimeInterval = 30
     private var glucoseWakeRequested = false
-    private var glucoseBackfillCompleted = false
-    private var glucoseBackfillTask: Task<Void, Never>?
-    private var glucoseBackfillID: UUID?
-    private let glucoseHealthStore = HKHealthStore()
     private var glucoseRepository: GlucoseOutboxRepository { .init(directory: repository.directory) }
+    private let credentials = GlookoCredentials()
+    private var rememberPassword = false
+    private var credentialProtectionMigrated = false
+    private var insulinEnabled = false
+    private var glucoseEnabled = false
+    private var allowCellular = false
+    private var sourceReplayRequired = false
+    private var alertThreshold: TimeInterval = 3600
+    private var syncHealth = GlookoSyncHealth()
+    private var authenticationTask: Task<GlookoClient, Error>?
+    private var authenticationID: UUID?
+    private var lastAutomaticAuthentication: Date?
+    private var healthTask: Task<Void, Never>?
+    private var healthTaskID: UUID?
+    private var connectedAt = Date()
     private var diagnosticState = GlookoDiagnostics()
     private var diagnosticStorageError: String?
     private var diagnosticPersistenceAvailable = true
@@ -132,21 +141,27 @@ public final class GlookoService: Service {
         accountID = rawState["accountID"] as? String
         ownsLegacyCredentials = rawState["legacyCredentialsOwned"] as? Bool ?? (accountID == nil && storedEmail != nil)
         onboarded = rawState["isOnboarded"] as? Bool ?? false
+        rememberPassword = rawState["rememberPassword"] as? Bool ?? onboarded
+        credentialProtectionMigrated = rawState["credentialProtectionMigrated"] as? Bool ?? false
+        insulinEnabled = rawState["insulinEnabled"] as? Bool ?? onboarded
+        glucoseEnabled = rawState["glucoseEnabled"] as? Bool ?? onboarded
+        allowCellular = rawState["allowCellular"] as? Bool ?? onboarded
+        alertThreshold = max(900, rawState["alertThreshold"] as? TimeInterval ?? 3600)
+        connectedAt = rawState["connectedAt"] as? Date ?? Date()
+        lastAutomaticAuthentication = rawState["lastAutomaticAuthentication"] as? Date
+        if let data = rawState["syncHealth"] as? Data, let stored = try? JSONDecoder().decode(GlookoSyncHealth.self, from: data) { syncHealth = stored }
         currentStatus.lastUploadAt = rawState["lastUploadAt"] as? Date
         currentStatus.lastAttemptAt = rawState["lastAttemptAt"] as? Date
         currentStatus.lastError = rawState["lastError"] as? String
         currentStatus.verificationDetail = rawState["verificationDetail"] as? String
         currentStatus.lastCarbConfirmedAt = rawState["lastCarbConfirmedAt"] as? Date
-        carbAnchorReset = rawState["carbAnchorReset"] as? Bool ?? false
         carbIdentityVersion = rawState["carbIdentityVersion"] as? Int ?? 0
         // Older builds lack the marker, but a confirmation proves that an outbox already existed.
         carbStorageCreated = (rawState["carbStorageCreated"] as? Bool ?? false) || currentStatus.lastCarbConfirmedAt != nil
         glucoseStorageCreated = rawState["glucoseStorageCreated"] as? Bool ?? false
-        glucoseAnchorReset = rawState["glucoseAnchorReset"] as? Bool ?? false
         currentStatus.lastGlucoseConfirmedAt = rawState["lastGlucoseConfirmedAt"] as? Date
         currentStatus.glucoseThrough = rawState["glucoseThrough"] as? Date
-        glucoseBackfillCompleted = rawState["glucoseBackfillVersion"] as? Int == 1
-        currentStatus.glucoseBackfillDetail = rawState["glucoseBackfillDetail"] as? String
+        currentStatus.glucoseBackfillDetail = "History supplied by Loop. No direct HealthKit read is performed."
         currentStatus.lastReportCheckedAt = rawState["lastReportCheckedAt"] as? Date
         currentStatus.reportWarnings = rawState["reportWarnings"] as? [String] ?? []
         currentStatus.pumpSourceLabel = rawState["pumpSourceLabel"] as? String
@@ -170,21 +185,15 @@ public final class GlookoService: Service {
         }
         if let accountID { restoreCarbs(accountID) }
         if let accountID { restoreGlucose(accountID); restoreDiagnostics(accountID) }
-        if onboarded && !glucoseAnchorReset {
-            // Earlier builds acknowledged glucose without sending it. Replay Loop's retained cache once.
-            Self.resetLoopGlucoseAnchor(); glucoseAnchorReset = true
-        }
-        if onboarded && (!carbAnchorReset || carbIdentityVersion < 1) {
-            // Replay retained sources once when adding provenance, so legacy GUIDs can be bound from
-            // the original version's clinical contents instead of guessing ownership from an identifier.
-            Self.resetLoopCarbAnchor()
-            carbAnchorReset = true; carbIdentityVersion = 1
+        sourceReplayRequired = rawState["sourceReplayRequired"] as? Bool ?? (onboarded && (!glucoseStorageCreated || carbIdentityVersion < 1))
+        if sourceReplayRequired {
+            currentStatus.glucoseBackfillError = "An older service acknowledged source data without retaining it. Remove and re-add this service, keeping local history, so Loop can replay its available history."
         }
         let service = accountID.map { Self.sessionService($0) } ?? Self.legacySessionService
-        let cookie = (try? KeychainManager().getGenericPasswordForService(service)) ??
-            (ownsLegacyCredentials ? try? KeychainManager().getGenericPasswordForService(Self.legacySessionService) : nil)
+        let cookie = (try? credentials.get(service)) ??
+            (ownsLegacyCredentials ? try? credentials.get(Self.legacySessionService) : nil)
         if let cookie {
-            client = GlookoClient(region: Self.region, sessionCookie: cookie)
+            client = makeClient(cookie: cookie, cellular: allowCellular)
             if let client { observeRequests(client, generation: lifecycle) }
         }
     }
@@ -216,6 +225,12 @@ public final class GlookoService: Service {
     public var rawState: RawStateValue {
         queue.sync {
             var value: RawStateValue = ["isOnboarded": onboarded, "verificationVersion": 1]
+            value["rememberPassword"] = rememberPassword; value["credentialProtectionMigrated"] = credentialProtectionMigrated
+            value["insulinEnabled"] = insulinEnabled
+            value["glucoseEnabled"] = glucoseEnabled; value["allowCellular"] = allowCellular
+            value["sourceReplayRequired"] = sourceReplayRequired; value["alertThreshold"] = alertThreshold
+            value["connectedAt"] = connectedAt; value["lastAutomaticAuthentication"] = lastAutomaticAuthentication
+            value["syncHealth"] = try? JSONEncoder().encode(syncHealth)
             value["email"] = storedEmail; value["accountID"] = accountID
             value["legacyCredentialsOwned"] = ownsLegacyCredentials
             value["lastUploadAt"] = currentStatus.lastUploadAt; value["lastAttemptAt"] = currentStatus.lastAttemptAt
@@ -223,14 +238,11 @@ public final class GlookoService: Service {
             value["verificationDetail"] = currentStatus.verificationDetail
             value["lastConfirmedAt"] = currentStatus.lastConfirmedAt
             value["lastCarbConfirmedAt"] = currentStatus.lastCarbConfirmedAt
-            value["carbAnchorReset"] = carbAnchorReset
             value["carbIdentityVersion"] = carbIdentityVersion
             value["carbStorageCreated"] = carbStorageCreated
             value["glucoseStorageCreated"] = glucoseStorageCreated
-            value["glucoseAnchorReset"] = glucoseAnchorReset
             value["lastGlucoseConfirmedAt"] = currentStatus.lastGlucoseConfirmedAt
             value["glucoseThrough"] = currentStatus.glucoseThrough
-            value["glucoseBackfillVersion"] = glucoseBackfillCompleted ? 1 : 0
             value["glucoseBackfillDetail"] = currentStatus.glucoseBackfillDetail
             value["lastReportCheckedAt"] = currentStatus.lastReportCheckedAt
             value["reportWarnings"] = currentStatus.reportWarnings
@@ -245,20 +257,21 @@ public final class GlookoService: Service {
     private func changed() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.publishHealthAlerts()
             self.stateDelegate?.pluginDidUpdateState(self)
             NotificationCenter.default.post(name: Self.stateDidChange, object: self)
         }
     }
 
     @discardableResult
-    public func signIn(email: String, password: String, historyStart: Date? = nil) async throws -> String {
+    public func signIn(email: String, password: String, historyStart: Date? = nil, rememberPassword: Bool = false, insulinEnabled: Bool = false, glucoseEnabled: Bool = false, allowCellular: Bool = false) async throws -> String {
         let request = UUID()
         let generation = try queue.sync { () throws -> UUID in
             guard !deleted else { throw CancellationError() }
             signInRequest = request
             return lifecycle
         }
-        let fresh = GlookoClient(region: Self.region)
+        let fresh = makeClient(cellular: allowCellular)
         try await fresh.signIn(email: email, password: password)
         let verified = try await fresh.verifiedAccount(expectedEmail: email)
         try Task.checkCancellation()
@@ -273,16 +286,20 @@ public final class GlookoService: Service {
             if let data = owned.reportingContextData { contexts = try JSONDecoder().decode([ReportingContext].self, from: data) }
             if owned.records.isEmpty && owned.pending.isEmpty && owned.unclassified.isEmpty { owned.historyStart = historyStart ?? Date() }
             try repository.save(owned)
-            try KeychainManager().replaceGenericPassword(password, forService: Self.passwordService(verified.id))
-            try KeychainManager().replaceGenericPassword(fresh.sessionCookie, forService: Self.sessionService(verified.id))
+            try credentials.set(rememberPassword ? password : nil, service: Self.passwordService(verified.id))
+            try credentials.set(fresh.sessionCookie, service: Self.sessionService(verified.id))
             removeOwnedLegacyCredentials()
             history = owned; account = verified; accountID = verified.id; storedEmail = verified.email
             if carbs == nil { restoreCarbs(verified.id) }
             if glucose == nil { restoreGlucose(verified.id) }
             restoreDiagnostics(verified.id)
             observeRequests(fresh, generation: generation)
-            if !glucoseAnchorReset { Self.resetLoopGlucoseAnchor(); glucoseAnchorReset = true }
-            carbAnchorReset = true
+            cancelUploads(); lifecycle = UUID()
+            self.rememberPassword = rememberPassword; credentialProtectionMigrated = true; self.insulinEnabled = insulinEnabled
+            self.glucoseEnabled = glucoseEnabled; self.allowCellular = allowCellular
+            syncHealth.authenticationRequired = nil; syncHealth.lastAccountVerified = Date()
+            lastAutomaticAuthentication = nil
+            observeRequests(fresh, generation: lifecycle)
             client = fresh; onboarded = true; signInRequest = nil; currentStatus.lastError = nil
         }
         changed()
@@ -291,22 +308,31 @@ public final class GlookoService: Service {
 
     public func cancelSignIn() { queue.sync { signInRequest = nil } }
 
+    /// Disconnect keeps local history for reconnection. The UI offers a separate explicit erase action.
     public func completeDelete() {
-        let keys = queue.sync { () -> (String, String, Bool) in
+        do { try removeService(eraseLocalData: false) }
+        catch { queue.sync { currentStatus.lastError = "Service removal failed: \(error)" }; changed() }
+    }
+
+    public func removeService(eraseLocalData: Bool) throws {
+        let keys = try queue.sync { () throws -> Set<String> in
+            var keys = Set<String>()
+            if let accountID { keys.formUnion([Self.passwordService(accountID), Self.sessionService(accountID)]) }
+            if ownsLegacyCredentials || eraseLocalData { keys.formUnion([Self.legacyPasswordService, Self.legacySessionService]) }
+            if eraseLocalData {
+                for key in try repository.localAccountStorageKeys() {
+                    keys.formUnion(["GlookoService.\(key).Password", "GlookoService.\(key).Session"])
+                }
+            }
             deleted = true; onboarded = false; lifecycle = UUID(); signInRequest = nil
             cancelUploads(); client = nil
-            return (accountID.map(Self.passwordService) ?? Self.legacyPasswordService,
-                    accountID.map(Self.sessionService) ?? Self.legacySessionService, ownsLegacyCredentials)
+            return keys
         }
-        do {
-            try KeychainManager().deleteGenericPassword(forService: keys.0)
-            try KeychainManager().deleteGenericPassword(forService: keys.1)
-            if keys.2 {
-                try KeychainManager().deleteGenericPassword(forService: Self.legacyPasswordService)
-                try KeychainManager().deleteGenericPassword(forService: Self.legacySessionService)
-            }
-        } catch { os_log("Could not remove Glooko credentials", log: log, type: .error) }
-        // Every patient's history, including unconfirmed work, remains partitioned on disk for reconnection.
+        for key in keys { try credentials.remove(key) }
+        if eraseLocalData { try repository.eraseAllLocalData() }
+        for id in GlookoSyncHealth.allNoticeIDs.union(["diagnostic-test"]) {
+            serviceDelegate?.retractAlert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: id))
+        }
         stateDelegate?.pluginWantsDeletion(self)
         changed()
     }
@@ -336,6 +362,8 @@ public final class GlookoService: Service {
     /// Called on the state queue. Every request-owning task belongs to this lifecycle.
     private func cancelUploads() {
         uploadTask?.cancel(); uploadTask = nil; uploading = false
+        authenticationTask?.cancel(); authenticationTask = nil; authenticationID = nil
+        healthTask?.cancel(); healthTask = nil; healthTaskID = nil
         inspectionTask?.cancel(); inspectionTask = nil; inspectionID = nil
         uploadWakeRequested = false; forcedUploadRequested = false
         carbTask?.cancel(); carbTask = nil; carbTaskID = nil
@@ -344,7 +372,6 @@ public final class GlookoService: Service {
         glucoseTask?.cancel(); glucoseTask = nil; glucoseTaskID = nil
         glucoseRetryTask?.cancel(); glucoseRetryTask = nil; glucoseRetryID = nil
         glucoseWakeRequested = false
-        glucoseBackfillTask?.cancel(); glucoseBackfillTask = nil; glucoseBackfillID = nil
     }
 
     private func check(_ generation: UUID) throws {
@@ -354,10 +381,95 @@ public final class GlookoService: Service {
         }
     }
 
-    /// Account identity is verified before every submission, including after restoring a stored cookie.
-    private func authenticatedClient(_ generation: UUID, renew: Bool = false) async throws -> GlookoClient {
+    public struct Options {
+        public var rememberPassword: Bool
+        public var insulinEnabled: Bool
+        public var glucoseEnabled: Bool
+        public var allowCellular: Bool
+        public var alertThreshold: TimeInterval
+        public var authenticationRequired: String?
+    }
+    public var options: Options {
+        queue.sync { .init(rememberPassword: rememberPassword, insulinEnabled: insulinEnabled,
+            glucoseEnabled: glucoseEnabled, allowCellular: allowCellular, alertThreshold: alertThreshold,
+            authenticationRequired: syncHealth.authenticationRequired) }
+    }
+    public func configureUploads(insulin: Bool, glucose: Bool, cellular: Bool) {
+        queue.sync {
+            let cookie = client?.sessionCookie
+            cancelUploads(); lifecycle = UUID()
+            insulinEnabled = insulin; glucoseEnabled = glucose; allowCellular = cellular
+            client = makeClient(cookie: cookie, cellular: allowCellular)
+            if let client { observeRequests(client, generation: lifecycle) }
+        }
+        changed()
+        Task { await uploadIfNeeded(force: true) }
+    }
+    public func stopRememberingPassword() throws {
+        try queue.sync {
+            if let accountID { try credentials.remove(Self.passwordService(accountID)) }
+            if ownsLegacyCredentials { try credentials.remove(Self.legacyPasswordService) }
+            rememberPassword = false
+        }
+        changed()
+    }
+    public func setAlertThreshold(_ seconds: TimeInterval) {
+        queue.sync { alertThreshold = min(86400, max(900, seconds)) }
+        changed()
+    }
+    private func makeClient(cookie: String? = nil, cellular: Bool) -> GlookoClient {
+        let config = URLSessionConfiguration.ephemeral
+        config.allowsCellularAccess = cellular
+        config.allowsExpensiveNetworkAccess = cellular
+        config.allowsConstrainedNetworkAccess = false
+        return GlookoClient(region: Self.region, sessionCookie: cookie, configuration: config)
+    }
+
+    private func authenticatedClient(_ generation: UUID, replacing failed: GlookoClient? = nil) async throws -> GlookoClient {
         try check(generation)
-        let saved = queue.sync { (client, accountID, storedEmail, ownsLegacyCredentials) }
+        let owned = try queue.sync { () throws -> (Task<GlookoClient, Error>, UUID) in
+            if syncHealth.authenticationRequired != nil { throw ServiceError.signInRequired }
+            if let task = authenticationTask, let id = authenticationID { return (task, id) }
+            let id = UUID(), renew = failed != nil && failed === client
+            let task = Task<GlookoClient, Error> { [weak self] in
+                guard let self else { throw CancellationError() }
+                return try await self.establishClient(generation, renew: renew)
+            }
+            authenticationTask = task; authenticationID = id
+            return (task, id)
+        }
+        defer { queue.sync { if authenticationID == owned.1 { authenticationTask = nil; authenticationID = nil } } }
+        do {
+            let result = try await owned.0.value
+            try check(generation)
+            // A concurrent validation can finish before a caller reports an expired data request.
+            // Join an actual renewal, but never retry the rejected client itself.
+            if let failed, result === failed {
+                queue.sync { if authenticationID == owned.1 { authenticationTask = nil; authenticationID = nil } }
+                return try await authenticatedClient(generation, replacing: failed)
+            }
+            return result
+        } catch {
+            var reason: String?
+            switch error {
+            case GlookoError.credentialRejected: reason = String(describing: error)
+            case GlookoError.twoFactorRequired: reason = "Glooko now requires an authentication method this session cannot use."
+            case ServiceError.signInRequired: reason = "The Glooko session is no longer authorised and automatic password recovery is unavailable."
+            case HistoryRepository.Failure.accountMismatch: reason = "Glooko no longer confirms this account's identity. It may be restricted, closed or signed into another account."
+            default: break
+            }
+            if let reason {
+                queue.sync { if lifecycle == generation, !deleted { syncHealth.authenticationRequired = reason; client = nil } }
+                changed()
+            }
+            throw error
+        }
+    }
+
+    /// Account identity is verified before every submission, including after restoring a stored cookie.
+    private func establishClient(_ generation: UUID, renew: Bool = false) async throws -> GlookoClient {
+        try check(generation)
+        let saved = queue.sync { (client, accountID, storedEmail, ownsLegacyCredentials, allowCellular) }
         guard let email = saved.2 else { throw ServiceError.signInRequired }
         var fresh = saved.0
         var verified: GlookoAccount?
@@ -367,11 +479,18 @@ public final class GlookoService: Service {
             catch GlookoError.notSignedIn { fresh = nil }
         } else { fresh = nil }
         if fresh == nil {
+            try queue.sync {
+                guard rememberPassword else { throw ServiceError.signInRequired }
+                if let last = lastAutomaticAuthentication, Date().timeIntervalSince(last) < 300 {
+                    throw ServiceError.blocked("Automatic sign-in is cooling down after a recent attempt. Try Sign in again to update the account.")
+                }
+                lastAutomaticAuthentication = Date()
+            }
             let service = saved.1.map(Self.passwordService) ?? Self.legacyPasswordService
-            let password = (try? KeychainManager().getGenericPasswordForService(service)) ??
-                (saved.3 ? try? KeychainManager().getGenericPasswordForService(Self.legacyPasswordService) : nil)
+            let password = (try? credentials.get(service)) ??
+                (saved.3 ? try? credentials.get(Self.legacyPasswordService) : nil)
             guard let password else { throw ServiceError.signInRequired }
-            let replacement = GlookoClient(region: Self.region)
+            let replacement = makeClient(cellular: saved.4)
             observeRequests(replacement, generation: generation)
             try await replacement.signIn(email: email, password: password)
             verified = try await replacement.verifiedAccount(expectedID: saved.1, expectedEmail: saved.1 == nil ? email : nil)
@@ -385,17 +504,22 @@ public final class GlookoService: Service {
             if accountID == nil || ownsLegacyCredentials {
                 guard storageError == nil, history != nil else { throw ServiceError.blocked(storageError ?? "History is unavailable") }
                 let migrated = try repository.bind(verified, legacyEmail: storedEmail)
-                if (try? KeychainManager().getGenericPasswordForService(Self.passwordService(verified.id))) == nil,
-                   let password = try? KeychainManager().getGenericPasswordForService(Self.legacyPasswordService) {
-                    try KeychainManager().replaceGenericPassword(password, forService: Self.passwordService(verified.id))
+                if (try? credentials.get(Self.passwordService(verified.id))) == nil,
+                   let password = try? credentials.get(Self.legacyPasswordService) {
+                    try credentials.set(rememberPassword ? password : nil, service: Self.passwordService(verified.id))
                 }
                 history = migrated; accountID = verified.id
                 if carbs == nil { restoreCarbs(verified.id) }
                 restoreDiagnostics(verified.id)
             }
-            try KeychainManager().replaceGenericPassword(fresh.sessionCookie, forService: Self.sessionService(verified.id))
+            try credentials.set(fresh.sessionCookie, service: Self.sessionService(verified.id))
+            if !credentialProtectionMigrated {
+                let password = rememberPassword ? try credentials.get(Self.passwordService(verified.id)) : nil
+                try credentials.set(password, service: Self.passwordService(verified.id))
+                credentialProtectionMigrated = true
+            }
             removeOwnedLegacyCredentials()
-            account = verified; storedEmail = verified.email; client = fresh
+            account = verified; storedEmail = verified.email; client = fresh; syncHealth.lastAccountVerified = Date()
         }
         return fresh
     }
@@ -404,8 +528,8 @@ public final class GlookoService: Service {
     private func removeOwnedLegacyCredentials() {
         guard ownsLegacyCredentials else { return }
         do {
-            try KeychainManager().deleteGenericPassword(forService: Self.legacyPasswordService)
-            try KeychainManager().deleteGenericPassword(forService: Self.legacySessionService)
+            try credentials.remove(Self.legacyPasswordService)
+            try credentials.remove(Self.legacySessionService)
             ownsLegacyCredentials = false
         } catch { os_log("Legacy credential cleanup will be retried", log: log, type: .error) }
     }
@@ -413,9 +537,9 @@ public final class GlookoService: Service {
     public func uploadIfNeeded(force: Bool = false) async {
         // Carbs are independent of pump eligibility and must also be drained by Upload now.
         async let carbUpload: Void = sendCarbs(force: force)
-        async let glucoseUpload: Void = backfillAndSendGlucose(force: force)
+        async let glucoseUpload: Void = sendGlucose(force: force)
         let task = queue.sync { () -> Task<Void, Never>? in
-            guard onboarded, !deleted else { return nil }
+            guard onboarded, !deleted, insulinEnabled else { return nil }
             if uploading {
                 uploadWakeRequested = true; forcedUploadRequested = forcedUploadRequested || force
                 return uploadTask
@@ -474,7 +598,7 @@ public final class GlookoService: Service {
                       let context = contexts.last, context.sourceID == history?.sourceID,
                       let settings = context.settings, var owned = history else { throw CancellationError() }
                 guard let file = try owned.exportFile(timeZone: context.timeZone, settings: settings) else { return nil }
-                let manifest = IngestionManifest(serial: owned.serial, events: owned.exportedEvents,
+                let manifest = IngestionManifest(serial: owned.serial, events: file.events,
                                                  timeZone: context.timeZone, committedThrough: owned.committedThrough,
                                                  repairedBasalIndices: owned.repairedBasalIndices)
                 let needsRecovery = manifest.repairedBasalIndices.contains { $0 > (owned.lastUploadedIndex ?? 0) }
@@ -503,7 +627,7 @@ public final class GlookoService: Service {
                 }
                 do { try await transport.repairZeroDurationBasals(prepared.2, recordIntent: journal) }
                 catch GlookoError.authenticationRequired {
-                    transport = try await authenticatedClient(generation, renew: true)
+                    transport = try await authenticatedClient(generation, replacing: transport)
                     try check(generation)
                     try await transport.repairZeroDurationBasals(prepared.2, recordIntent: journal)
                 }
@@ -511,7 +635,7 @@ public final class GlookoService: Service {
             }
             var result = try await transport.uploadDeviceFile(prepared.0, extractorName: "InsuletOmnipod")
             if Self.sessionExpiredStatuses.contains(result.status) {
-                transport = try await authenticatedClient(generation, renew: true)
+                transport = try await authenticatedClient(generation, replacing: transport)
                 try check(generation)
                 result = try await transport.uploadDeviceFile(prepared.0, extractorName: "InsuletOmnipod")
             }
@@ -675,7 +799,7 @@ public final class GlookoService: Service {
                 let result: (confirmed: [SourceCarb], detail: String)
                 do { result = try await transport.submitCarbs(due, retiringMeals: retiring, timeZone: timeZone) }
                 catch GlookoError.authenticationRequired {
-                    transport = try await authenticatedClient(generation, renew: true)
+                    transport = try await authenticatedClient(generation, replacing: transport)
                     try check(generation)
                     result = try await transport.submitCarbs(due, retiringMeals: retiring, timeZone: timeZone)
                 }
@@ -739,68 +863,11 @@ public final class GlookoService: Service {
         carbStorageCreated = true
     }
 
-    /// Loop keeps each service's carb query position in its app-group defaults (RemoteDataServicesManager).
-    private static func resetLoopCarbAnchor() {
-        guard let suite = Bundle.main.object(forInfoDictionaryKey: "AppGroupIdentifier") as? String else { return }
-        UserDefaults(suiteName: suite)?.removeObject(forKey: "com.loopkit.Loop.RemoteDataServicesManager.\(pluginIdentifier).CarbQueryAnchor")
-    }
+    // Source replay belongs to Loop's RemoteDataServicesManager. Never delete its private query-anchor
+    // UserDefaults keys here. Add/restore uses the host's normal stream queries; explicit remove/re-add
+    // requests the host's available retained history through its own supported lifecycle.
 
-    private static func resetLoopGlucoseAnchor() {
-        guard let suite = Bundle.main.object(forInfoDictionaryKey: "AppGroupIdentifier") as? String else { return }
-        UserDefaults(suiteName: suite)?.removeObject(forKey: "com.loopkit.Loop.RemoteDataServicesManager.\(pluginIdentifier).GlucoseQueryAnchor")
-    }
-
-    // MARK: Glucose
-
-    private func backfillAndSendGlucose(force: Bool) async {
-        let task = queue.sync { () -> Task<Void, Never>? in
-            guard onboarded, !deleted, !glucoseBackfillCompleted, glucoseStorageError == nil else { return nil }
-            if let task = glucoseBackfillTask { return task }
-            let generation = lifecycle, id = UUID()
-            glucoseBackfillID = id
-            let task = Task<Void, Never> { [weak self] in await self?.backfillGlucose(generation: generation, id: id) }
-            glucoseBackfillTask = task
-            return task
-        }
-        await task?.value
-        await sendGlucose(force: force)
-    }
-
-    /// Loop's incremental glucose cache is shorter than its HealthKit history. Read the existing app's
-    /// authorised samples once; this does not request permissions or write anything to HealthKit.
-    private func backfillGlucose(generation: UUID, id: UUID) async {
-        defer {
-            queue.sync { if glucoseBackfillID == id { glucoseBackfillTask = nil; glucoseBackfillID = nil } }
-            changed()
-        }
-        do {
-            try check(generation)
-            let start = queue.sync { max(history?.historyStart ?? Date().addingTimeInterval(-14 * 86400), Date().addingTimeInterval(-14 * 86400)) }
-            let samples: [HKQuantitySample] = try await withCheckedThrowingContinuation { continuation in
-                let predicate = HKQuery.predicateForSamples(withStart: start, end: Date(), options: .strictStartDate)
-                let query = HKSampleQuery(sampleType: HKQuantityType.quantityType(forIdentifier: .bloodGlucose)!, predicate: predicate,
-                                          limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, samples, error in
-                    if let error { continuation.resume(throwing: error) }
-                    else { continuation.resume(returning: samples as? [HKQuantitySample] ?? []) }
-                }
-                glucoseHealthStore.execute(query)
-            }
-            try check(generation)
-            try queue.sync {
-                guard lifecycle == generation, glucoseBackfillID == id, !deleted else { throw CancellationError() }
-                let count = try stageGlucose(samples.map(StoredGlucoseSample.init(sample:)))
-                guard count > 0 else {
-                    throw ServiceError.blocked("No retained numeric Dexcom G7 readings were readable from HealthKit. Recent uploads continue; historical backfill is not confirmed.")
-                }
-                glucoseBackfillCompleted = true
-                currentStatus.glucoseBackfillError = nil
-                currentStatus.glucoseBackfillDetail = "\(count) retained Dexcom G7 readings staged from HealthKit"
-            }
-        } catch is CancellationError { }
-        catch { queue.sync { if lifecycle == generation, !deleted { currentStatus.glucoseBackfillError = "Historical glucose: \(error)" } } }
-    }
-
-    /// Called on the state queue, both by Loop's callback and the historical HealthKit read.
+    /// Called on the state queue from Loop's StoredGlucoseSample stream.
     @discardableResult private func stageGlucose(_ samples: [StoredGlucoseSample]) throws -> Int {
         guard !deleted, let accountID else { throw ServiceError.signInRequired }
         if glucose == nil { restoreGlucose(accountID) }
@@ -840,7 +907,7 @@ public final class GlookoService: Service {
 
     private func sendGlucose(force: Bool = false) async {
         let task = queue.sync { () -> Task<Void, Never>? in
-            guard onboarded, !deleted, accountID != nil else { return nil }
+            guard onboarded, !deleted, accountID != nil, glucoseEnabled else { return nil }
             if force { glucoseRetryTask?.cancel(); glucoseRetryTask = nil; glucoseRetryID = nil }
             if let task = glucoseTask { glucoseWakeRequested = true; return task }
             guard force || glucoseRetryTask == nil, glucoseStorageError == nil, glucose?.due.isEmpty == false else { return nil }
@@ -887,7 +954,7 @@ public final class GlookoService: Service {
                 queue.sync { recordDiagnostic("glucose", "Checking \(batch.count) readings, \(batch.first!.minute) through \(batch.last!.minute)") }
                 do { confirmed = try await transport.submitGlucose(batch) }
                 catch GlookoError.authenticationRequired {
-                    transport = try await authenticatedClient(generation, renew: true)
+                    transport = try await authenticatedClient(generation, replacing: transport)
                     try check(generation)
                     confirmed = try await transport.submitGlucose(batch)
                 }
@@ -912,6 +979,64 @@ public final class GlookoService: Service {
             }
         } catch is CancellationError { }
         catch { queue.sync { if lifecycle == generation, !deleted { currentStatus.glucoseError = "Glucose not confirmed: \(error)"; recordDiagnostic("glucose error", String(describing: error)) } } }
+    }
+
+    public func sendTestAlert() {
+        let content = Alert.Content(title: "Glooko test alert", body: "This checks Loop's Glooko alert delivery. No account or upload failure is being reported.", acknowledgeActionButtonLabel: "OK")
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.queue.sync(execute: { self.deleted }) else { return }
+            self.serviceDelegate?.issueAlert(Alert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: "diagnostic-test"),
+                foregroundContent: content, backgroundContent: content, trigger: .immediate))
+        }
+    }
+
+    private func publishHealthAlerts() {
+        let evaluation = queue.sync { () -> GlookoSyncHealth.Delivery in
+            guard !deleted, onboarded else { return .init(issue: [], retract: []) }
+            var pending = Set<GlookoSyncHealth.Stream>()
+            if insulinEnabled, history?.hasUnuploadedRecords == true || history?.pending.values.contains(where: { !$0.isMutable && $0.end < Date().addingTimeInterval(-3600) }) == true { pending.insert(.insulin) }
+            if glucoseEnabled, glucose?.due.isEmpty == false { pending.insert(.glucose) }
+            if carbs?.due.isEmpty == false { pending.insert(.carbs) }
+            var reason = storageError ?? carbStorageError ?? glucoseStorageError
+            if sourceReplayRequired { reason = currentStatus.glucoseBackfillError }
+            if insulinEnabled {
+                reason = reason ?? history?.blockedReason(now: Date())
+                if Date().timeIntervalSince(connectedAt) > 300 {
+                    if contexts.last?.isRealPump != true { reason = reason ?? "A real pump source is unavailable. Insulin uploads are paused." }
+                    else if contexts.last?.settings == nil { reason = reason ?? contexts.last?.problem ?? "Complete pump settings are unavailable. Insulin uploads are paused." }
+                }
+                if let source = history?.sourceID, let latest = contexts.last?.sourceID, source != latest { reason = "The connected pump source changed. Insulin uploads are paused." }
+                if Date().timeIntervalSince(connectedAt) > alertThreshold && (!doseQueryDrained || !settingsQueryDrained) { reason = "Loop has not finished reading the dose and settings streams. Insulin uploads are paused." }
+            }
+            let delivery = syncHealth.notifications(pending: pending, pausedReason: reason, threshold: alertThreshold, canDeliver: serviceDelegate != nil)
+            scheduleHealthCheck()
+            return delivery
+        }
+        guard let issuer = serviceDelegate else { return }
+        for id in evaluation.retract {
+            issuer.retractAlert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: id))
+        }
+        for notice in evaluation.issue {
+            let content = Alert.Content(title: notice.title, body: notice.message, acknowledgeActionButtonLabel: "OK")
+            issuer.issueAlert(Alert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: notice.id),
+                foregroundContent: content, backgroundContent: content, trigger: .immediate))
+        }
+    }
+    /// One owned wake-up at a time. BLE/foreground source activity also evaluates health; iOS may suspend
+    /// this task while the host is not executing, so it does not replace Loop's own not-running alerts.
+    private func scheduleHealthCheck() {
+        guard healthTask == nil, !deleted, onboarded, serviceDelegate != nil else { return }
+        let id = UUID(), generation = lifecycle; healthTaskID = id
+        healthTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 60_000_000_000) } catch { return }
+            guard let self else { return }
+            let ready = self.queue.sync { () -> Bool in
+                guard self.lifecycle == generation, self.healthTaskID == id, !self.deleted else { return false }
+                self.healthTask = nil; self.healthTaskID = nil; return true
+            }
+            guard ready else { return }
+            self.changed()
+        }
     }
 
     public struct DiagnosticSnapshot {
@@ -967,6 +1092,9 @@ public final class GlookoService: Service {
             self.queue.async { [weak self] in
                 guard let self, self.lifecycle == generation, !self.deleted else { return }
                 self.recordDiagnostic("HTTP", trace.message)
+                if let status = trace.status, (200..<300).contains(status), let upload = trace.upload,
+                   let stream = GlookoSyncHealth.Stream(rawValue: upload.rawValue) { self.syncHealth.submitted(stream) }
+                self.changed()
             }
         }
     }

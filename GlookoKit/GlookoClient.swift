@@ -30,10 +30,10 @@ public final class GlookoClient: @unchecked Sendable {
     private let session: URLSession
     private let deviceInformation: String
 
-    public init(region: Region = .eu, sessionCookie: String? = nil, deviceId: String = UUID().uuidString) {
+    public init(region: Region = .eu, sessionCookie: String? = nil, deviceId: String = UUID().uuidString, configuration: URLSessionConfiguration = .ephemeral) {
         self.region = region
         self.cookie = sessionCookie
-        let config = URLSessionConfiguration.ephemeral
+        let config = configuration
         config.httpCookieAcceptPolicy = .never
         config.httpShouldSetCookies = false
         config.timeoutIntervalForRequest = 30
@@ -82,21 +82,27 @@ public final class GlookoClient: @unchecked Sendable {
                                             body: try JSONSerialization.data(withJSONObject: body), authenticated: false)
                 } catch {
                     if Task.isCancelled { throw CancellationError() }
-                    failures.append("\(host)\(path): \(error.localizedDescription)"); continue
+                    failures.append("\(host)\(path): network error \((error as NSError).code)"); continue
                 }
-                lastSignInDiagnostics = "HTTP \(result.status); cookies " +
-                    result.setCookies.map { "\($0.name)(\($0.value.count) chars)" }.joined(separator: ", ") +
-                    "; body keys " + Self.keys(result.body)
-                // Rails may send a cleared cookie before the real one, so take the last non-empty value.
-                if (200..<300).contains(result.status),
-                   let cookie = result.setCookies.last(where: { $0.name == Self.sessionCookieName && !$0.value.isEmpty }) {
+                let usableCookie = result.setCookies.last(where: {
+                    $0.name == Self.sessionCookieName && !$0.value.isEmpty &&
+                    ($0.expiresDate.map { $0 > Date() } ?? true)
+                })
+                let jsonResponse = result.contentType?.lowercased().contains("text/html") != true
+                lastSignInDiagnostics = "HTTP \(result.status); usable session cookie \(usableCookie != nil); non-HTML response \(jsonResponse)"
+                // MFA can issue a provisional cookie. It is not an authorised session.
+                if Self.twoFactorRequired(result.body) { throw GlookoError.twoFactorRequired }
+                if (200..<300).contains(result.status), jsonResponse, let cookie = usableCookie {
                     sessionCookie = "\(cookie.name)=\(cookie.value)"
                     return "\(host)\(path)"
                 }
-                if Self.twoFactorRequired(result.body) { throw GlookoError.twoFactorRequired }
-                failures.append("\(host)\(path) [\(Self.keys(try JSONSerialization.data(withJSONObject: body)))]: HTTP \(result.status) \(Self.redact(result.text.prefix(200)))")
-                // A credential rejection won't improve on another host; stop so the account isn't locked out.
-                if result.status == 401 { throw GlookoError.signInFailed(failures) }
+                // Never include server text or transport descriptions in a password-handling failure:
+                // either can echo credentials. Status/path metadata are sufficient for diagnostics.
+                failures.append("\(host)\(path): HTTP \(result.status); authorised session not established")
+                // A credential/account rejection will not improve on another host or payload shape.
+                if [401, 403, 423, 429].contains(result.status) {
+                    throw GlookoError.credentialRejected(result.status)
+                }
             }
         }
         throw GlookoError.signInFailed(failures)
@@ -134,15 +140,19 @@ public final class GlookoClient: @unchecked Sendable {
             req.setValue(cookie, forHTTPHeaderField: "Cookie")
         }
         try Task.checkCancellation()
+        let extractor = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "extractorName" }?.value
+        let upload: GlookoRequestTrace.Upload? = method == "POST" && url.path == "/api/v3/device/file/upload" ?
+            (extractor == "InsuletOmnipod" ? .insulin : extractor == "LibreviewCSV" ? .glucose : nil) :
+            method == "PUT" && url.path == "/api/v2/foods" ? .carbs : nil
         let started = Date()
         let data: Data, response: URLResponse
         do { (data, response) = try await session.data(for: req, delegate: RefuseRedirects.shared) }
         catch {
-            requestObserver?(.init(method: method, route: url.path, status: nil, duration: Date().timeIntervalSince(started),
+            requestObserver?(.init(upload: upload, method: method, route: url.path, status: nil, duration: Date().timeIntervalSince(started),
                 sentBytes: body?.count ?? 0, receivedBytes: 0, errorCode: (error as NSError).code))
             throw error
         }
-        requestObserver?(.init(method: method, route: url.path, status: (response as? HTTPURLResponse)?.statusCode,
+        requestObserver?(.init(upload: upload, method: method, route: url.path, status: (response as? HTTPURLResponse)?.statusCode,
             duration: Date().timeIntervalSince(started), sentBytes: body?.count ?? 0, receivedBytes: data.count, errorCode: nil))
         guard let http = response as? HTTPURLResponse else { throw GlookoError.invalidResponse }
         let fields = http.allHeaderFields.reduce(into: [String: String]()) { $0["\($1.key)"] = "\($1.value)" }
@@ -204,7 +214,7 @@ private final class RefuseRedirects: NSObject, URLSessionTaskDelegate, @unchecke
 
 public enum GlookoError: Error, CustomStringConvertible {
     case signInFailed([String]), twoFactorRequired, notSignedIn, badURL(String), invalidResource, invalidResponse
-    case authenticationRequired(Int), requestRejected(String)
+    case authenticationRequired(Int), credentialRejected(Int), requestRejected(String)
     public var description: String {
         switch self {
         case .signInFailed(let f): return "Sign-in failed:\n  " + f.joined(separator: "\n  ")
@@ -214,6 +224,8 @@ public enum GlookoError: Error, CustomStringConvertible {
         case .invalidResource: return "Invalid Glooko resource name"
         case .invalidResponse: return "Glooko returned an unexpected response"
         case .authenticationRequired: return "The Glooko session has expired; sign in again"
+        case .credentialRejected(let status):
+            return "Glooko rejected sign-in or restricted this account (HTTP \(status)). Check the account and password, then sign in again."
         case .requestRejected(let reason): return reason
         }
     }

@@ -356,7 +356,7 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
     /// Submission and retention are separate: unconfirmed records are never pruned. If old confirmed history
     /// can be pruned, retain its preceding delivery record to anchor the first surviving interval.
     public mutating func exportFile(timeZone: TimeZone, retention: TimeInterval = 14 * 86400,
-                                    basalProgram: [Double]? = nil, settings: IBFPumpSettings? = nil) throws -> (data: Data, lastIndex: UInt32)? {
+                                    basalProgram: [Double]? = nil, settings: IBFPumpSettings? = nil) throws -> (data: Data, lastIndex: UInt32, events: [IBFHistoryEvent])? {
         guard conflicts.isEmpty else { throw HistoryError.conflictsRequireReview }
         guard hasUnuploadedRecords, let committedThrough else { return nil }
         guard let settings else { throw PumpHistoryIBF.EncodingError.missingSettings }
@@ -379,10 +379,28 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
         }
         committed = committed.filter { $0.value >= sourceCutoff || sourceDoses[$0.key] != nil }
         legacyIDs = legacyIDs.intersection(Set(committed.keys).union(pending.keys))
-        let history = exportedEvents
+        var history = exportedEvents
+        // The native importer accepts overlapping complete-day suffixes. An arbitrary record delta
+        // can recalculate a partial day's summary, so keep yesterday, today and every unconfirmed day.
+        // Only use an actual midnight delivery anchor with consistent source clock context; otherwise
+        // send the retained file. Local retention, indices and the immutable submitted prefix stay intact.
+        if lastUploadedIndex != nil,
+           history.allSatisfy({ ($0.utcOffset ?? timeZone.secondsFromGMT(for: $0.date)) == timeZone.secondsFromGMT(for: $0.date) }) {
+            var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
+            let today = calendar.startOfDay(for: committedThrough)
+            if let yesterday = calendar.date(byAdding: .day, value: -1, to: today) {
+                let earliest = calendar.startOfDay(for: firstUnconfirmed)
+                let wanted = min(yesterday, earliest)
+                let boundary = history.last(where: { event in
+                    guard event.date <= wanted, event.date == calendar.startOfDay(for: event.date) else { return false }
+                    switch event.record { case .basal, .suspend: return true; default: return false }
+                })?.date
+                if let boundary { history.removeAll { $0.date < boundary } }
+            }
+        }
         let document = PumpHistoryIBF(serial: serial, timeZone: timeZone, powerUp: powerUp,
                                       basalProgram: settings.basal, events: history, settings: settings)
-        return (try document.encode(), history.last!.index)
+        return (try document.encode(), history.last!.index, history)
     }
 
     public var exportedEvents: [IBFHistoryEvent] {

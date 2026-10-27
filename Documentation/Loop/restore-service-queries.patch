@@ -1,0 +1,112 @@
+--- a/Loop/Managers/RemoteDataServicesManager.swift
++++ b/Loop/Managers/RemoteDataServicesManager.swift
+@@ -61,6 +61,9 @@
+         lock.withLock {
+             unlockedRemoteDataServices.append(remoteDataService)
+         }
++        // A restored service may have durable work and needs fresh drain boundaries even when no
++        // settings or dose changes occur after launch. Retain each stream's existing query anchor.
++        uploadExistingData(to: remoteDataService)
+     }
+ 
+     func removeService(_ remoteDataService: RemoteDataService) {
+--- a/Loop.xcodeproj/project.pbxproj
++++ b/Loop.xcodeproj/project.pbxproj
+@@ -7,6 +7,7 @@
+ 	objects = {
+ 
+ /* Begin PBXBuildFile section */
++		C02026102606000000000002 /* RemoteDataServicesManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C02026102606000000000001 /* RemoteDataServicesManagerTests.swift */; };
+ 		1419606428D9550400BA86E0 /* LoopKitUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 437AFEE6203688CF008C4892 /* LoopKitUI.framework */; };
+ 		1419606928D9554E00BA86E0 /* LoopKitUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 437AFEE6203688CF008C4892 /* LoopKitUI.framework */; };
+ 		1419606A28D955BC00BA86E0 /* MockKitUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C101947127DD473C004E7EB8 /* MockKitUI.framework */; };
+@@ -759,6 +760,7 @@
+ /* End PBXCopyFilesBuildPhase section */
+ 
+ /* Begin PBXFileReference section */
++		C02026102606000000000001 /* RemoteDataServicesManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Managers/RemoteDataServicesManagerTests.swift; sourceTree = "<group>"; };
+ 		142CB7582A60BF2E0075748A /* EditMode.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = EditMode.swift; sourceTree = "<group>"; };
+ 		142CB75A2A60BFC30075748A /* FavoriteFoodsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = FavoriteFoodsView.swift; sourceTree = "<group>"; };
+ 		1452F4A82A851C9400F8B9E4 /* AddEditFavoriteFoodViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddEditFavoriteFoodViewModel.swift; sourceTree = "<group>"; };
+@@ -2050,6 +2052,7 @@
+ 		43F78D2C1C8FC58F002152D1 /* LoopTests */ = {
+ 			isa = PBXGroup;
+ 			children = (
++				C02026102606000000000001 /* RemoteDataServicesManagerTests.swift */,
+ 				E9C58A7624DB510500487A17 /* Fixtures */,
+ 				B4CAD8772549D2330057946B /* LoopCore */,
+ 				1DA7A83F24476E8C008257F0 /* Managers */,
+@@ -3726,6 +3729,7 @@
+ 			isa = PBXSourcesBuildPhase;
+ 			buildActionMask = 2147483647;
+ 			files = (
++				C02026102606000000000002 /* RemoteDataServicesManagerTests.swift in Sources */,
+ 				A9DF02CB24F72B9E00B7C988 /* CriticalEventLogTests.swift in Sources */,
+ 				1D80313D24746274002810DF /* AlertStoreTests.swift in Sources */,
+ 				C1777A6625A125F100595963 /* ManualEntryDoseViewModelTests.swift in Sources */,
+--- /dev/null
++++ b/LoopTests/Managers/RemoteDataServicesManagerTests.swift
+@@ -0,0 +1,63 @@
++import XCTest
++@testable import LoopKit
++@testable import Loop
++
++final class RemoteDataServicesManagerTests: XCTestCase {
++    func testRestoreQueriesUnchangedDoseSettingsAndCarbStreamsWithoutAnotherEvent() throws {
++        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
++        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
++        // Core Data can outlive these stores through queued work; leave its files in the
++        // isolated test sandbox rather than unlinking an open SQLite database.
++        let cache = PersistenceController(directoryURL: folder)
++        let ready = expectation(description: "source cache ready")
++        cache.onReady { error in XCTAssertNil(error); ready.fulfill() }
++        wait(for: [ready], timeout: 5)
++        let carbStore = CarbStore(cacheStore: cache, cacheLength: 86400,
++            defaultAbsorptionTimes: (fast: 1800, medium: 10800, slow: 18000), provenanceIdentifier: "offline")
++        let doseStore = DoseStore(cacheStore: cache, insulinModelProvider: PresetInsulinModelProvider(defaultRapidActingModel: ExponentialInsulinModelPreset.rapidActingAdult),
++            longestEffectDuration: 21600, basalProfile: nil, insulinSensitivitySchedule: nil, provenanceIdentifier: "offline")
++        let manager = RemoteDataServicesManager(alertStore: AlertStore(), carbStore: carbStore, doseStore: doseStore,
++            dosingDecisionStore: DosingDecisionStore(store: cache, expireAfter: 86400),
++            glucoseStore: GlucoseStore(cacheStore: cache, provenanceIdentifier: "offline"),
++            cgmEventStore: CgmEventStore(cacheStore: cache), settingsStore: SettingsStore(store: cache, expireAfter: 86400),
++            overrideHistory: TemporaryScheduleOverrideHistory(), insulinDeliveryStore: doseStore.insulinDeliveryStore)
++        let doses = expectation(description: "dose drain"), settings = expectation(description: "settings drain"), carbs = expectation(description: "carb drain")
++        let service = RestoreQueryService { kind in
++            switch kind { case "dose": doses.fulfill(); case "settings": settings.fulfill(); case "carb": carbs.fulfill(); default: break }
++        }
++        manager.restoreService(service)
++        wait(for: [doses, settings, carbs], timeout: 5)
++        let completed = expectation(description: "all restoration queries complete")
++        manager.uploadGroup.notify(queue: .main) { completed.fulfill() }
++        wait(for: [completed], timeout: 5)
++        manager.removeService(service)
++    }
++}
++
++private final class RestoreQueryService: RemoteDataService {
++    static let pluginIdentifier = "RestoreQueryTest-\(UUID().uuidString)"
++    static let localizedTitle = "Restoration test"
++    weak var serviceDelegate: ServiceDelegate?
++    weak var stateDelegate: StatefulPluggableDelegate?
++    var rawState: RawStateValue { [:] }
++    var isOnboarded: Bool { true }
++    private let drained: (String) -> Void
++    init(_ drained: @escaping (String) -> Void) { self.drained = drained }
++    init?(rawState: RawStateValue) { drained = { _ in } }
++    func uploadDoseData(created: [DoseEntry], deleted: [DoseEntry], completion: @escaping (Result<Bool, Error>) -> Void) {
++        XCTAssertTrue(created.isEmpty && deleted.isEmpty); drained("dose"); completion(.success(true))
++    }
++    func uploadSettingsData(_ stored: [StoredSettings], completion: @escaping (Result<Bool, Error>) -> Void) {
++        XCTAssertTrue(stored.isEmpty); drained("settings"); completion(.success(true))
++    }
++    func uploadCarbData(created: [SyncCarbObject], updated: [SyncCarbObject], deleted: [SyncCarbObject], completion: @escaping (Result<Bool, Error>) -> Void) {
++        XCTAssertTrue(created.isEmpty && updated.isEmpty && deleted.isEmpty); drained("carb"); completion(.success(true))
++    }
++    func uploadAlertData(_ stored: [SyncAlertObject], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
++    func uploadTemporaryOverrideData(updated: [TemporaryScheduleOverride], deleted: [TemporaryScheduleOverride], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
++    func uploadDosingDecisionData(_ stored: [StoredDosingDecision], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
++    func uploadGlucoseData(_ stored: [StoredGlucoseSample], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
++    func uploadPumpEventData(_ stored: [PersistedPumpEvent], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
++    func uploadCgmEventData(_ stored: [PersistedCgmEvent], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
++    func remoteNotificationWasReceived(_ notification: [String: AnyObject]) async throws {}
++}
