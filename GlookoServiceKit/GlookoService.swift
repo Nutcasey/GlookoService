@@ -106,6 +106,12 @@ public final class GlookoService: Service {
     private var glucoseBackfillID: UUID?
     private let glucoseHealthStore = HKHealthStore()
     private var glucoseRepository: GlucoseOutboxRepository { .init(directory: repository.directory) }
+    private var diagnosticState = GlookoDiagnostics()
+    private var diagnosticStorageError: String?
+    private var diagnosticPersistenceAvailable = true
+    private var inspectionTask: Task<Void, Never>?
+    private var inspectionID: UUID?
+    private var diagnosticRepository: GlookoDiagnosticsRepository { .init(directory: repository.directory) }
     private let uploadInterval: TimeInterval = 15 * 60
     public static let region = GlookoClient.Region(signInHosts: ["eu.api.glooko.com", "global.api.glooko.com"], dataHost: "eu.api.glooko.com")
 
@@ -163,7 +169,7 @@ public final class GlookoService: Service {
             catch { storageError = "Could not restore pump history: \(error)"; currentStatus.lastError = storageError }
         }
         if let accountID { restoreCarbs(accountID) }
-        if let accountID { restoreGlucose(accountID) }
+        if let accountID { restoreGlucose(accountID); restoreDiagnostics(accountID) }
         if onboarded && !glucoseAnchorReset {
             // Earlier builds acknowledged glucose without sending it. Replay Loop's retained cache once.
             Self.resetLoopGlucoseAnchor(); glucoseAnchorReset = true
@@ -179,6 +185,7 @@ public final class GlookoService: Service {
             (ownsLegacyCredentials ? try? KeychainManager().getGenericPasswordForService(Self.legacySessionService) : nil)
         if let cookie {
             client = GlookoClient(region: Self.region, sessionCookie: cookie)
+            if let client { observeRequests(client, generation: lifecycle) }
         }
     }
 
@@ -272,6 +279,8 @@ public final class GlookoService: Service {
             history = owned; account = verified; accountID = verified.id; storedEmail = verified.email
             if carbs == nil { restoreCarbs(verified.id) }
             if glucose == nil { restoreGlucose(verified.id) }
+            restoreDiagnostics(verified.id)
+            observeRequests(fresh, generation: generation)
             if !glucoseAnchorReset { Self.resetLoopGlucoseAnchor(); glucoseAnchorReset = true }
             carbAnchorReset = true
             client = fresh; onboarded = true; signInRequest = nil; currentStatus.lastError = nil
@@ -315,6 +324,8 @@ public final class GlookoService: Service {
             try repository.save(fresh)
             cancelUploads(); lifecycle = UUID()
             history = fresh; storageError = nil; currentStatus = Status()
+            diagnosticState.lastInspection = nil; diagnosticState.inspectionError = nil
+            recordDiagnostic("history", "Started a new reporting period; previous history remains archived")
             currentStatus.carbError = carbStorageError
         }
         changed()
@@ -325,6 +336,7 @@ public final class GlookoService: Service {
     /// Called on the state queue. Every request-owning task belongs to this lifecycle.
     private func cancelUploads() {
         uploadTask?.cancel(); uploadTask = nil; uploading = false
+        inspectionTask?.cancel(); inspectionTask = nil; inspectionID = nil
         uploadWakeRequested = false; forcedUploadRequested = false
         carbTask?.cancel(); carbTask = nil; carbTaskID = nil
         carbRetryTask?.cancel(); carbRetryTask = nil; carbRetryID = nil
@@ -360,11 +372,13 @@ public final class GlookoService: Service {
                 (saved.3 ? try? KeychainManager().getGenericPasswordForService(Self.legacyPasswordService) : nil)
             guard let password else { throw ServiceError.signInRequired }
             let replacement = GlookoClient(region: Self.region)
+            observeRequests(replacement, generation: generation)
             try await replacement.signIn(email: email, password: password)
             verified = try await replacement.verifiedAccount(expectedID: saved.1, expectedEmail: saved.1 == nil ? email : nil)
             fresh = replacement
         }
         guard let fresh, let verified else { throw ServiceError.signInRequired }
+        observeRequests(fresh, generation: generation)
         try check(generation)
         try queue.sync {
             guard lifecycle == generation, !deleted else { throw CancellationError() }
@@ -377,6 +391,7 @@ public final class GlookoService: Service {
                 }
                 history = migrated; accountID = verified.id
                 if carbs == nil { restoreCarbs(verified.id) }
+                restoreDiagnostics(verified.id)
             }
             try KeychainManager().replaceGenericPassword(fresh.sessionCookie, forService: Self.sessionService(verified.id))
             removeOwnedLegacyCredentials()
@@ -474,6 +489,7 @@ public final class GlookoService: Service {
                 return
             }
             try check(generation)
+            queue.sync { recordDiagnostic("insulin", "Submitting \(prepared.0.count) bytes; \(prepared.2.records.count) final records, \(prepared.2.deferredRecords) deferred intervals") }
             os_log("Submitting history: %d bytes, %d final records, %d deferred intervals", log: log, type: .default,
                    prepared.0.count, prepared.2.records.count, prepared.2.deferredRecords)
             if prepared.3 {
@@ -524,6 +540,7 @@ public final class GlookoService: Service {
             try queue.sync {
                 guard lifecycle == generation, !deleted, var owned = history else { throw CancellationError() }
                 currentStatus.verificationDetail = verification.detail
+                recordDiagnostic("insulin", "Readback: \(verification.matchedRecords) matched, \(verification.missingRecords) missing, \(verification.mismatchedRecords) mismatched, \(verification.duplicateRecords) duplicate, \(verification.deferredRecords) deferred")
                 currentStatus.lastError = owned.blockedReason(now: Date()) ??
                     ((verification.mismatchedRecords > 0 || verification.duplicateRecords > 0) ? verification.detail : nil)
                 if verification.confirmed {
@@ -547,7 +564,7 @@ public final class GlookoService: Service {
             }
         } catch is CancellationError { }
         catch {
-            queue.sync { if lifecycle == generation && !deleted { currentStatus.lastError = String(describing: error) } }
+            queue.sync { if lifecycle == generation && !deleted { currentStatus.lastError = String(describing: error); recordDiagnostic("insulin error", String(describing: error)) } }
         }
     }
 
@@ -675,12 +692,13 @@ public final class GlookoService: Service {
                     return outbox.due.contains { sent[$0.storageID] != $0 }
                 }
                 changed()
+                queue.sync { recordDiagnostic("carbs", currentStatus.carbDetail ?? "Carb readback completed") }
                 if !shouldContinue { return }
             }
         } catch is CancellationError { }
         catch {
             queue.sync {
-                if lifecycle == generation, !deleted { currentStatus.carbError = "Carbs not sent yet: \(error)" }
+                if lifecycle == generation, !deleted { currentStatus.carbError = "Carbs not sent yet: \(error)"; recordDiagnostic("carb error", String(describing: error)) }
             }
         }
     }
@@ -866,6 +884,7 @@ public final class GlookoService: Service {
                 let batch = queue.sync { Array(glucose?.due.prefix(500) ?? []) }
                 guard !batch.isEmpty else { return }
                 let confirmed: [SourceGlucose]
+                queue.sync { recordDiagnostic("glucose", "Checking \(batch.count) readings, \(batch.first!.minute) through \(batch.last!.minute)") }
                 do { confirmed = try await transport.submitGlucose(batch) }
                 catch GlookoError.authenticationRequired {
                     transport = try await authenticatedClient(generation, renew: true)
@@ -880,6 +899,7 @@ public final class GlookoService: Service {
                     try saveGlucose(outbox); glucose = outbox
                     currentStatus.glucoseError = nil
                     currentStatus.glucoseDetail = "\(confirmed.count) of \(batch.count) readings verified in Glooko records and graphs"
+                    recordDiagnostic("glucose", "\(confirmed.count) of \(batch.count) readings verified in stored records and graphs")
                     if !confirmed.isEmpty {
                         currentStatus.lastGlucoseConfirmedAt = Date()
                         let latest = confirmed.map(\.date).max()!
@@ -891,7 +911,106 @@ public final class GlookoService: Service {
                 if confirmed.count < batch.count { return }
             }
         } catch is CancellationError { }
-        catch { queue.sync { if lifecycle == generation, !deleted { currentStatus.glucoseError = "Glucose not confirmed: \(error)" } } }
+        catch { queue.sync { if lifecycle == generation, !deleted { currentStatus.glucoseError = "Glucose not confirmed: \(error)"; recordDiagnostic("glucose error", String(describing: error)) } } }
+    }
+
+    public struct DiagnosticSnapshot {
+        public var state: GlookoDiagnostics
+        public var storageError: String?
+        public var checking: Bool
+        public var doseQueryDrained: Bool
+        public var settingsQueryDrained: Bool
+        public var todayGlucose: Int
+        public var pendingGlucose: Int
+        public var latestAcceptedGlucose: Date?
+        public var pendingCarbs: Int
+        public var pendingDoses: Int
+        public var latestSourceDose: Date?
+        public var nextPumpAttempt: Date?
+    }
+
+    public var diagnostics: DiagnosticSnapshot {
+        queue.sync {
+            let zone = contexts.last?.timeZone ?? .current
+            let day = String(WallClock(timeZone: zone).string(Date()).prefix(10))
+            let readings = glucose?.entries.values.map(\.reading) ?? []
+            return .init(state: diagnosticState, storageError: diagnosticStorageError, checking: inspectionTask != nil,
+                doseQueryDrained: doseQueryDrained, settingsQueryDrained: settingsQueryDrained,
+                todayGlucose: readings.filter { $0.minute.hasPrefix(day) }.count, pendingGlucose: glucose?.due.count ?? 0,
+                latestAcceptedGlucose: readings.map(\.date).max(), pendingCarbs: carbs?.due.count ?? 0,
+                pendingDoses: (history?.pending.count ?? 0) + (history?.unclassified.count ?? 0),
+                latestSourceDose: history?.sourceDoses.values.map(\.start).max(),
+                nextPumpAttempt: currentStatus.lastAttemptAt?.addingTimeInterval(uploadInterval))
+        }
+    }
+
+    /// Called on the state queue. Logging failures never block clinical storage or uploads.
+    private func restoreDiagnostics(_ accountID: String) {
+        do { diagnosticState = try diagnosticRepository.load(accountID: accountID); diagnosticStorageError = nil; diagnosticPersistenceAvailable = true }
+        catch {
+            diagnosticStorageError = "Saved diagnostics could not be read: \(error)"
+            diagnosticPersistenceAvailable = false // Preserve the unreadable file for investigation.
+        }
+    }
+
+    private func recordDiagnostic(_ category: String, _ message: String) {
+        guard !deleted else { return }
+        diagnosticState.record(.init(category: category, message: message))
+        guard let accountID, diagnosticPersistenceAvailable else { return }
+        do { try diagnosticRepository.save(diagnosticState, accountID: accountID); diagnosticStorageError = nil }
+        catch { diagnosticStorageError = "Diagnostics could not be saved: \(error)" }
+    }
+
+    private func observeRequests(_ transport: GlookoClient, generation: UUID) {
+        transport.requestObserver = { [weak self] trace in
+            guard let self else { return }
+            self.queue.async { [weak self] in
+                guard let self, self.lifecycle == generation, !self.deleted else { return }
+                self.recordDiagnostic("HTTP", trace.message)
+            }
+        }
+    }
+
+    /// A fresh read-only comparison; it neither uploads files nor advances clinical acknowledgements.
+    public func checkGlookoNow() async {
+        let task = queue.sync { () -> Task<Void, Never>? in
+            guard onboarded, !deleted else { return nil }
+            if let inspectionTask { return inspectionTask }
+            let generation = lifecycle, id = UUID(); inspectionID = id
+            let task = Task<Void, Never> { [weak self] in
+                guard let self else { return }
+                defer {
+                    self.queue.sync { if self.inspectionID == id { self.inspectionTask = nil; self.inspectionID = nil } }
+                    self.changed()
+                }
+                do {
+                    let transport = try await self.authenticatedClient(generation)
+                    let captured = try self.queue.sync { () throws -> (PumpHistoryLog, [SourceGlucose], TimeZone) in
+                        guard self.lifecycle == generation, !self.deleted, let history = self.history,
+                              let context = self.contexts.last, self.glucoseStorageError == nil,
+                              let glucose = self.glucose else { throw ServiceError.blocked("Source history or glucose storage is unavailable") }
+                        self.recordDiagnostic("live check", "Starting read-only stored-record and graph verification")
+                        return (history, glucose.entries.values.map(\.reading), context.timeZone)
+                    }
+                    let report = try await transport.inspectSync(history: captured.0, glucose: captured.1, timeZone: captured.2)
+                    try self.check(generation)
+                    self.queue.sync {
+                        guard self.lifecycle == generation, !self.deleted else { return }
+                        self.diagnosticState.lastInspection = report; self.diagnosticState.inspectionError = nil
+                        self.recordDiagnostic("live check", "Glucose today: \(report.glucose.matchedStored)/\(report.glucose.expected) stored, \(report.glucose.matchedGraphed)/\(report.glucose.expected) graphed; insulin \(report.insulinMatched) matched, \(report.insulinMissing) missing")
+                    }
+                } catch is CancellationError { }
+                catch {
+                    self.queue.sync {
+                        guard self.lifecycle == generation, !self.deleted else { return }
+                        self.diagnosticState.inspectionError = GlookoClient.redact(String(describing: error))
+                        self.recordDiagnostic("live check error", String(describing: error))
+                    }
+                }
+            }
+            inspectionTask = task; return task
+        }
+        await task?.value
     }
 
     private static let sessionExpiredStatuses: Set<Int> = [301, 302, 303, 307, 308, 401, 403, 421]
@@ -921,12 +1040,14 @@ extension GlookoService: RemoteDataService {
                 try repository.save(owned)
                 history = owned
                 doseQueryDrained = created.isEmpty && deleted.isEmpty
+                diagnosticState.lastDoseCallback = Date()
+                recordDiagnostic("source", "Dose callback: \(created.count) created, \(deleted.count) deleted; drained \(doseQueryDrained)")
             }
             completion(.success(true))
             changed()
             if created.isEmpty && deleted.isEmpty { Task { await uploadIfNeeded() } }
         } catch {
-            queue.sync { currentStatus.lastError = "Could not store source history: \(error)" }
+            queue.sync { currentStatus.lastError = "Could not store source history: \(error)"; recordDiagnostic("source error", String(describing: error)) }
             changed(); completion(.failure(error))
         }
     }
@@ -947,11 +1068,13 @@ extension GlookoService: RemoteDataService {
                 owned.reportingContextData = try JSONEncoder().encode(updated)
                 try repository.save(owned)
                 history = owned; contexts = updated; settingsQueryDrained = stored.isEmpty
+                diagnosticState.lastSettingsCallback = Date()
+                recordDiagnostic("source", "Settings callback: \(stored.count) snapshots; drained \(settingsQueryDrained)")
             }
             changed(); completion(.success(true))
             if stored.isEmpty { Task { await uploadIfNeeded() } }
         } catch {
-            queue.sync { currentStatus.lastError = "Could not store source settings: \(error)" }
+            queue.sync { currentStatus.lastError = "Could not store source settings: \(error)"; recordDiagnostic("source error", String(describing: error)) }
             changed(); completion(.failure(error))
         }
     }
@@ -985,11 +1108,18 @@ extension GlookoService: RemoteDataService {
     public func uploadDosingDecisionData(_ stored: [StoredDosingDecision], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
     public func uploadGlucoseData(_ stored: [StoredGlucoseSample], completion: @escaping (Result<Bool, Error>) -> Void) {
         do {
-            try queue.sync { _ = try stageGlucose(stored) }
+            try queue.sync {
+                diagnosticState.lastGlucoseCallback = Date()
+                let count = try stageGlucose(stored)
+                if let latest = stored.map(\.startDate).max() {
+                    diagnosticState.latestGlucoseReceived = max(diagnosticState.latestGlucoseReceived ?? latest, latest)
+                }
+                recordDiagnostic("source", "Glucose callback: \(stored.count) received, \(count) eligible; \(glucose?.due.count ?? 0) awaiting confirmation")
+            }
             completion(.success(true)); changed()
             Task { await sendGlucose() }
         } catch {
-            queue.sync { currentStatus.glucoseError = "Could not store glucose: \(error)" }
+            queue.sync { currentStatus.glucoseError = "Could not store glucose: \(error)"; recordDiagnostic("source error", String(describing: error)) }
             changed(); completion(.failure(error))
         }
     }

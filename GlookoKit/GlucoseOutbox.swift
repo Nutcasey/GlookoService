@@ -178,7 +178,7 @@ public extension GlookoClient {
         return confirmed + matched
     }
 
-    private func glucoseGraph(days: [String], code: String) async throws -> [String: [Int]] {
+    internal func glucoseGraph(days: [String], code: String) async throws -> [String: [Int]] {
         var points: [String: [Int]] = [:]
         for day in days {
             try Task.checkCancellation()

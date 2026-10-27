@@ -22,6 +22,11 @@ public final class GlookoClient: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return cookie }
         set { lock.lock(); defer { lock.unlock() }; cookie = newValue }
     }
+    private var traceObserver: (@Sendable (GlookoRequestTrace) -> Void)?
+    public var requestObserver: (@Sendable (GlookoRequestTrace) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return traceObserver }
+        set { lock.lock(); defer { lock.unlock() }; traceObserver = newValue }
+    }
     private let session: URLSession
     private let deviceInformation: String
 
@@ -129,7 +134,16 @@ public final class GlookoClient: @unchecked Sendable {
             req.setValue(cookie, forHTTPHeaderField: "Cookie")
         }
         try Task.checkCancellation()
-        let (data, response) = try await session.data(for: req, delegate: RefuseRedirects.shared)
+        let started = Date()
+        let data: Data, response: URLResponse
+        do { (data, response) = try await session.data(for: req, delegate: RefuseRedirects.shared) }
+        catch {
+            requestObserver?(.init(method: method, route: url.path, status: nil, duration: Date().timeIntervalSince(started),
+                sentBytes: body?.count ?? 0, receivedBytes: 0, errorCode: (error as NSError).code))
+            throw error
+        }
+        requestObserver?(.init(method: method, route: url.path, status: (response as? HTTPURLResponse)?.statusCode,
+            duration: Date().timeIntervalSince(started), sentBytes: body?.count ?? 0, receivedBytes: data.count, errorCode: nil))
         guard let http = response as? HTTPURLResponse else { throw GlookoError.invalidResponse }
         let fields = http.allHeaderFields.reduce(into: [String: String]()) { $0["\($1.key)"] = "\($1.value)" }
         let cookies = HTTPCookie.cookies(withResponseHeaderFields: fields, for: url)
