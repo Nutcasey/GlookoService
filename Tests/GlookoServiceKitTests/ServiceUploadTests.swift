@@ -71,6 +71,52 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertTrue(predicate(), "Expected the observable operation to finish before its deadline")
     }
 
+    private func completeSettings() -> StoredSettings {
+        let zone = TimeZone(secondsFromGMT: 0)!
+        let settings = StoredSettings(date: start.addingTimeInterval(-1), maximumBasalRatePerHour: 3, maximumBolus: 10,
+            suspendThreshold: GlucoseThreshold(unit: HKUnit(from: "mg/dL"), value: 75),
+            basalRateSchedule: BasalRateSchedule(dailyItems: [.init(startTime: 0, value: 1)], timeZone: zone),
+            insulinSensitivitySchedule: InsulinSensitivitySchedule(unit: HKUnit(from: "mg/dL"), dailyItems: [.init(startTime: 0, value: 50)], timeZone: zone),
+            carbRatioSchedule: CarbRatioSchedule(unit: .gram(), dailyItems: [.init(startTime: 0, value: 12)], timeZone: zone),
+            pumpDevice: HKDevice(name: "Offline", manufacturer: "Test", model: "Fixture", hardwareVersion: nil,
+                                 firmwareVersion: nil, softwareVersion: nil, localIdentifier: "offline-pump", udiDeviceIdentifier: nil))
+        // StoredSettings's target is supplied separately to keep its declaration-order arguments explicit.
+        let target = GlucoseRangeSchedule(unit: HKUnit(from: "mg/dL"), dailyItems: [.init(startTime: 0, value: DoubleRange(minValue: 100, maxValue: 110))], timeZone: zone)!
+        let complete = StoredSettings(date: settings.date, glucoseTargetRangeSchedule: target,
+            maximumBasalRatePerHour: settings.maximumBasalRatePerHour, maximumBolus: settings.maximumBolus,
+            suspendThreshold: settings.suspendThreshold, basalRateSchedule: settings.basalRateSchedule,
+            insulinSensitivitySchedule: settings.insulinSensitivitySchedule, carbRatioSchedule: settings.carbRatioSchedule,
+            pumpDevice: settings.pumpDevice)
+        return complete
+    }
+
+    func testARestoredServiceDoesNotAlertWhileLoopDrainsAChangedDoseBatch() async throws {
+        let original = try await signedIn()
+        original.uploadSettingsData([completeSettings()]) { _ in }
+        original.uploadSettingsData([]) { _ in }
+        let basal = DoseEntry(type: .basal, startDate: start, endDate: start.addingTimeInterval(3600), value: 1, unit: .unitsPerHour, syncIdentifier: "basal")
+        original.uploadDoseData(created: [basal], deleted: []) { _ in }
+        original.uploadDoseData(created: [], deleted: []) { _ in }
+        try await eventually { OfflineGlooko.uploadedFile != nil }
+        // Relaunch long after the service was connected, with Loop restarting both source streams.
+        var state = original.rawState
+        state["connectedAt"] = Date().addingTimeInterval(-7200)
+        let restored = try XCTUnwrap(GlookoService(rawState: state)); services.append(restored)
+        let host = RecordingHost()
+        restored.serviceDelegate = host
+        restored.uploadSettingsData([]) { _ in }
+        restored.uploadDoseData(created: [], deleted: []) { _ in }
+        await MainActor.run {}
+        let next = DoseEntry(type: .basal, startDate: start.addingTimeInterval(3600), endDate: start.addingTimeInterval(4200), value: 0.5, unit: .unitsPerHour, syncIdentifier: "next-basal")
+        restored.uploadDoseData(created: [next], deleted: []) { _ in }
+        await MainActor.run {}
+        restored.uploadDoseData(created: [], deleted: []) { _ in }
+        await MainActor.run {}
+        let issued = await MainActor.run { host.issued }
+        XCTAssertFalse(issued.contains { $0.identifier.alertIdentifier == "uploads-paused" },
+                       "A changed batch followed by Loop's drain is normal operation: \(issued.map(\.foregroundContent?.body))")
+    }
+
     func testConcurrentStreamsShareOnePasswordRecoveryAndStopAfterCredentialRejection() async throws {
         let service = try await signedIn()
         OfflineGlooko.expireSessionAndRejectPassword()
@@ -178,21 +224,7 @@ final class ServiceUploadTests: XCTestCase {
 
     func testSourceDeletionDuringAuthenticationIsAppliedBeforeFileSubmission() async throws {
         let service = try await signedIn()
-        let zone = TimeZone(secondsFromGMT: 0)!
-        let settings = StoredSettings(date: start.addingTimeInterval(-1), maximumBasalRatePerHour: 3, maximumBolus: 10,
-            suspendThreshold: GlucoseThreshold(unit: HKUnit(from: "mg/dL"), value: 75),
-            basalRateSchedule: BasalRateSchedule(dailyItems: [.init(startTime: 0, value: 1)], timeZone: zone),
-            insulinSensitivitySchedule: InsulinSensitivitySchedule(unit: HKUnit(from: "mg/dL"), dailyItems: [.init(startTime: 0, value: 50)], timeZone: zone),
-            carbRatioSchedule: CarbRatioSchedule(unit: .gram(), dailyItems: [.init(startTime: 0, value: 12)], timeZone: zone),
-            pumpDevice: HKDevice(name: "Offline", manufacturer: "Test", model: "Fixture", hardwareVersion: nil,
-                                 firmwareVersion: nil, softwareVersion: nil, localIdentifier: "offline-pump", udiDeviceIdentifier: nil))
-        // StoredSettings's target is supplied separately to keep its declaration-order arguments explicit.
-        let target = GlucoseRangeSchedule(unit: HKUnit(from: "mg/dL"), dailyItems: [.init(startTime: 0, value: DoubleRange(minValue: 100, maxValue: 110))], timeZone: zone)!
-        let complete = StoredSettings(date: settings.date, glucoseTargetRangeSchedule: target,
-            maximumBasalRatePerHour: settings.maximumBasalRatePerHour, maximumBolus: settings.maximumBolus,
-            suspendThreshold: settings.suspendThreshold, basalRateSchedule: settings.basalRateSchedule,
-            insulinSensitivitySchedule: settings.insulinSensitivitySchedule, carbRatioSchedule: settings.carbRatioSchedule,
-            pumpDevice: settings.pumpDevice)
+        let complete = completeSettings()
         service.uploadSettingsData([complete]) { _ in }
         service.uploadSettingsData([]) { _ in }
         service.uploadDoseData(created: [], deleted: []) { _ in }
@@ -372,4 +404,16 @@ private final class OfflineGlooko: URLProtocol {
         client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: payload))
         client?.urlProtocolDidFinishLoading(self)
     }
+}
+
+private final class RecordingHost: ServiceDelegate {
+    var issued: [Alert] = []
+    let hostIdentifier = "com.loopkit.GlookoServiceKitTests"
+    let hostVersion = "1"
+    func issueAlert(_ alert: Alert) { issued.append(alert) }
+    func retractAlert(identifier: Alert.Identifier) {}
+    func enactRemoteOverride(name: String, durationTime: TimeInterval?, remoteAddress: String) async throws {}
+    func cancelRemoteOverride() async throws {}
+    func deliverRemoteCarbs(amountInGrams: Double, absorptionTime: TimeInterval?, foodType: String?, startDate: Date?) async throws {}
+    func deliverRemoteBolus(amountInUnits: Double) async throws {}
 }
