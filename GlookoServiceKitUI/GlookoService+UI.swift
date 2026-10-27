@@ -237,6 +237,21 @@ struct StatusView: View {
                 row("Waiting to send", String(model.snapshot.summary.pendingCarbs))
                 if let detail = model.snapshot.status.carbDetail { Text(detail).foregroundColor(.secondary) }
                 if let error = model.snapshot.status.carbError { Text(error).foregroundColor(.red) }
+                Text("Find carb-only food entries in Glooko Graphs and History. Its Diet panel may remain empty for these entries.").foregroundColor(.secondary)
+            }
+            Section(header: Text("Glucose"), footer: Text("Numeric Dexcom G7 readings from Loop are sent through Glooko's CSV importer. Glooko lists this as a LibreView CSV reporting source, with minute-resolution timestamps. Original sensor timestamps stay on this phone. Existing matching readings are not uploaded twice.")) {
+                row("Last confirmed", text(model.snapshot.status.lastGlucoseConfirmedAt))
+                row("Confirmed through minute", text(model.snapshot.status.glucoseThrough))
+                row("Waiting to send", String(model.snapshot.summary.pendingGlucose))
+                if let detail = model.snapshot.status.glucoseBackfillDetail { Text(detail).foregroundColor(.secondary) }
+                if let error = model.snapshot.status.glucoseBackfillError { Text(error).foregroundColor(.red) }
+                if let detail = model.snapshot.status.glucoseDetail { Text(detail).foregroundColor(.secondary) }
+                if let error = model.snapshot.status.glucoseError { Text(error).foregroundColor(.red) }
+            }
+            Section(header: Text("Glooko reports"), footer: Text("Device-record confirmation and Glooko's Summary are checked separately. Report differences do not change the source insulin quantities. Automatic bolus labels are preserved in Loop history; the current Glooko pump-file format cannot carry them.")) {
+                row("Last checked", text(model.snapshot.status.lastReportCheckedAt))
+                ForEach(model.snapshot.status.reportWarnings, id: \.self) { Text($0).foregroundColor(.orange) }
+                if let error = model.snapshot.status.reportError { Text(error).foregroundColor(.red) }
             }
             Section(header: Text("History")) {
                 row("History from", text(model.snapshot.summary.historyStart))

@@ -10,6 +10,7 @@
 		04E0F8691AA7347912866BDB /* IngestionRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2BD0A48924061E162D135AF /* IngestionRecovery.swift */; };
 		0B9B224BBF92691C7DC6D2F6 /* CarbOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FCD333294FAD9B1CB5B9757 /* CarbOutbox.swift */; };
 		1C0BA1DA4F4AC3A99E3901BA /* GlookoService+UI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 431FFF85D52B938076630689 /* GlookoService+UI.swift */; };
+		20F01DD2DF4AEB654F7E1826 /* ReportAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 787EB60716FBAADE00A586D4 /* ReportAudit.swift */; };
 		28851B99E22188A090AD9F43 /* GlookoClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14943A645E8F9C3DCF61AF41 /* GlookoClient.swift */; };
 		2B1E76D521A3389F2D1E89C6 /* GlookoServiceKitUI.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 3D8D18557ABE513F0AD1488F /* GlookoServiceKitUI.framework */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2D6666BB0E9119C82F427A62 /* SyncReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 342A3C5C150C1AE866DA2DB2 /* SyncReader.swift */; };
@@ -41,6 +42,7 @@
 		DE0EAA8CDC9A622A76767AAD /* LoopKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4B7525F927564C2D84B0BCBA /* LoopKit.framework */; };
 		E7F0BDBAFB8A997455C96723 /* LoopKitUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 79EB4DAB821E6034482C9839 /* LoopKitUI.framework */; };
 		E9450BFE11D2BE09C152E534 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3D08E50B455599FA482C5464 /* Assets.xcassets */; };
+		FACD6C595D84922321335C83 /* GlucoseOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AB843BBE2A0DE5DC6B5B717 /* GlucoseOutbox.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -128,8 +130,10 @@
 		66DD61AC3ADCCB2555C03457 /* PumpHistoryIBF.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PumpHistoryIBF.swift; sourceTree = "<group>"; };
 		6DA8AC0BCA3CB800D9AD3C81 /* Records.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Records.swift; sourceTree = "<group>"; };
 		70C9162EEACF086DFC596319 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		787EB60716FBAADE00A586D4 /* ReportAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReportAudit.swift; sourceTree = "<group>"; };
 		78EA70D967D00898EE0E0577 /* GlookoService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlookoService.swift; sourceTree = "<group>"; };
 		79EB4DAB821E6034482C9839 /* LoopKitUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = LoopKitUI.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		8AB843BBE2A0DE5DC6B5B717 /* GlucoseOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlucoseOutbox.swift; sourceTree = "<group>"; };
 		96C9531BA7197B9BEA854487 /* PumpHistoryLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PumpHistoryLog.swift; sourceTree = "<group>"; };
 		A0F5F1B720C9BD1133A087B7 /* SyntheticIBF.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticIBF.swift; sourceTree = "<group>"; };
 		A2BD0A48924061E162D135AF /* IngestionRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IngestionRecovery.swift; sourceTree = "<group>"; };
@@ -201,6 +205,7 @@
 				2DFE1312B7FF629716A237B6 /* CarbOutboxRepository.swift */,
 				E6C12599142AA47FE8DDB88F /* DeviceFileUpload.swift */,
 				14943A645E8F9C3DCF61AF41 /* GlookoClient.swift */,
+				8AB843BBE2A0DE5DC6B5B717 /* GlucoseOutbox.swift */,
 				E0A61A29622C7D2B0AE2FABC /* HistoryRepository.swift */,
 				03409173E592B661BC461774 /* IBFPumpSettings.swift */,
 				A2BD0A48924061E162D135AF /* IngestionRecovery.swift */,
@@ -208,6 +213,7 @@
 				66DD61AC3ADCCB2555C03457 /* PumpHistoryIBF.swift */,
 				96C9531BA7197B9BEA854487 /* PumpHistoryLog.swift */,
 				6DA8AC0BCA3CB800D9AD3C81 /* Records.swift */,
+				787EB60716FBAADE00A586D4 /* ReportAudit.swift */,
 				342A3C5C150C1AE866DA2DB2 /* SyncReader.swift */,
 				A0F5F1B720C9BD1133A087B7 /* SyntheticIBF.swift */,
 			);
@@ -499,6 +505,7 @@
 				36143A0B7E8F6FDF9DDF5685 /* DeviceFileUpload.swift in Sources */,
 				28851B99E22188A090AD9F43 /* GlookoClient.swift in Sources */,
 				39EAF01A55A983063B9E2697 /* GlookoService.swift in Sources */,
+				FACD6C595D84922321335C83 /* GlucoseOutbox.swift in Sources */,
 				DCFDBC6D1EE4D0DDF4935D32 /* HistoryRepository.swift in Sources */,
 				6FA3248B72BBEFE19383654D /* IBFPumpSettings.swift in Sources */,
 				04E0F8691AA7347912866BDB /* IngestionRecovery.swift in Sources */,
@@ -506,6 +513,7 @@
 				D68D68B81D456B7923772C2F /* PumpHistoryIBF.swift in Sources */,
 				C9B628A9C4B5B7159C4BC953 /* PumpHistoryLog.swift in Sources */,
 				B640E4795B21F015134E4296 /* Records.swift in Sources */,
+				20F01DD2DF4AEB654F7E1826 /* ReportAudit.swift in Sources */,
 				371E552AAF21FA5439BC63B3 /* ReportingContext.swift in Sources */,
 				2D6666BB0E9119C82F427A62 /* SyncReader.swift in Sources */,
 				B3C7DF4811B4583694E0DCA4 /* SyntheticIBF.swift in Sources */,
