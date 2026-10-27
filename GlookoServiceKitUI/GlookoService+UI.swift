@@ -213,9 +213,26 @@ struct StatusView: View {
     }
     var body: some View {
         Form {
+            Section(header: Text("Upload source"), footer: Text("Glooko's website may still display ‘Insulet Omnipod System’. The Loop source label is saved and verified separately.")) {
+                HStack(spacing: 12) {
+                    Image("Loop", bundle: Bundle(for: GlookoServiceCoordinator.self))
+                        .resizable().scaledToFit().frame(width: 44, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 10)).accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(model.snapshot.summary.pumpUploadName ?? "Waiting for a real pump")
+                            .font(.headline).accessibilityIdentifier("glooko-pump-upload-source")
+                        Text("Insulin uploaded by Loop").font(.subheadline).foregroundColor(.secondary)
+                    }
+                }
+                row("Saved in Glooko", model.snapshot.status.pumpSourceLabel ?? "Waiting to verify")
+                    .accessibilityIdentifier("glooko-pump-source-label")
+                row("Label verified", text(model.snapshot.status.pumpSourceLabelVerifiedAt))
+                if let error = model.snapshot.status.pumpSourceLabelError {
+                    Text(error).foregroundColor(.orange).accessibilityIdentifier("glooko-pump-source-error")
+                }
+            }
             Section(header: Text("Account")) {
                 row("Signed in as", model.snapshot.email ?? "—")
-                row("Pump source", model.snapshot.summary.sourceName ?? "Waiting for Loop")
                 row("Build", Self.build).accessibilityIdentifier("glooko-build")
             }
             Section(header: Text("Uploads"), footer: Text("Final history settles for one hour. Loop must finish reading its history before sending. Submission and confirmed Glooko records are tracked separately.")) {
