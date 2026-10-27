@@ -55,6 +55,9 @@ public final class GlookoService: Service {
     private let log = OSLog(subsystem: "com.loopkit.GlookoService", category: "GlookoService")
     private let repository: HistoryRepository
     private let carbRepository: CarbOutboxRepository
+    private let insulinRepository: InsulinOutboxRepository
+    private var insulin: InsulinOutbox?
+    private var insulinStorageError: String?
     private var account: GlookoAccount?
     private var accountID: String?
     private var storedEmail: String?
@@ -119,11 +122,13 @@ public final class GlookoService: Service {
     public init() {
         repository = HistoryRepository(directory: Self.historyDirectory)
         carbRepository = CarbOutboxRepository(directory: Self.historyDirectory)
+        insulinRepository = InsulinOutboxRepository(directory: Self.historyDirectory)
     }
 
     public init?(rawState: RawStateValue) {
         repository = HistoryRepository(directory: Self.historyDirectory)
         carbRepository = CarbOutboxRepository(directory: Self.historyDirectory)
+        insulinRepository = InsulinOutboxRepository(directory: Self.historyDirectory)
         storedEmail = rawState["email"] as? String
         accountID = rawState["accountID"] as? String
         ownsLegacyCredentials = rawState["legacyCredentialsOwned"] as? Bool ?? (accountID == nil && storedEmail != nil)
@@ -168,6 +173,7 @@ public final class GlookoService: Service {
         }
         if let accountID { restoreCarbs(accountID) }
         if let accountID { restoreDiagnostics(accountID); removeRetiredGlucoseData(accountID) }
+        if let accountID, onboarded { restoreInsulin(accountID) }
         sourceReplayRequired = onboarded && carbIdentityVersion < 1
         if sourceReplayRequired {
             currentStatus.sourceReplayDetail = "Legacy carb ownership needs source replay. Remove and re-add this service, keeping local history, so Loop can supply its available cache."
@@ -188,19 +194,13 @@ public final class GlookoService: Service {
     public var snapshot: Snapshot {
         queue.sync {
             Snapshot(email: storedEmail, isOnboarded: onboarded, status: currentStatus,
-                     summary: Summary(serial: history?.serial ?? 0, historyStart: history?.historyStart,
-                                      records: history?.records.count ?? 0,
-                                      pendingDoses: (history?.pending.count ?? 0) + (history?.unclassified.count ?? 0),
-                                      committedThrough: history?.committedThrough, lateDoses: history?.lateDoses ?? 0,
-                                      conflictCount: history?.conflicts.count ?? 0,
-                                      hasUnuploadedRecords: history?.hasUnuploadedRecords ?? false,
-                                      sourceName: contexts.last?.sourceName,
-                                      pumpUploadName: contexts.last.flatMap { $0.isRealPump ? PumpAttribution(serial: history?.serial ?? 0, sourceName: $0.sourceName).displayName : nil },
-                                      canStartNewPeriod: accountID != nil && contexts.last?.isRealPump == true && contexts.last?.settings != nil &&
-                                        (storageError != nil || history?.blockedReason(now: Date()) != nil ||
-                                         (history?.sourceID != nil && history?.sourceID != contexts.last?.sourceID)),
-                                      pendingCarbs: carbs?.due.count ?? 0,
-                                      correctedBasalIntervals: Set(history?.ingestionCorrections.values.filter { $0.confirmedAt != nil }.map(\.index) ?? []).count))
+                     summary: Summary(serial: 0, historyStart: insulin?.reportingStart ?? history?.historyStart,
+                                      records: insulin?.confirmedEntries.count ?? 0,
+                                      pendingDoses: insulin?.due.count ?? 0,
+                                      committedThrough: insulin?.basalHorizon(now: Date()), lateDoses: 0, conflictCount: 0,
+                                      hasUnuploadedRecords: insulin?.due.isEmpty == false,
+                                      sourceName: contexts.last?.sourceName, pumpUploadName: nil, canStartNewPeriod: false,
+                                      pendingCarbs: carbs?.due.count ?? 0, correctedBasalIntervals: 0))
         }
     }
 
@@ -270,6 +270,7 @@ public final class GlookoService: Service {
             history = owned; account = verified; accountID = verified.id; storedEmail = verified.email
             if carbs == nil { restoreCarbs(verified.id) }
             restoreDiagnostics(verified.id)
+            if insulin == nil { restoreInsulin(verified.id) }
             removeRetiredGlucoseData(verified.id)
             observeRequests(fresh, generation: generation)
             cancelUploads(); lifecycle = UUID()
@@ -313,27 +314,6 @@ public final class GlookoService: Service {
         }
         stateDelegate?.pluginWantsDeletion(self)
         changed()
-    }
-
-    /// An explicit recovery action archives unresolved history; it never rewrites submitted PDM indices.
-    public func startNewReportingPeriod() throws {
-        try queue.sync {
-            guard !deleted, let accountID, let context = contexts.last, let source = context.sourceID,
-                  context.settings != nil else { throw ServiceError.blocked("Connect a real pump and wait for its settings first") }
-            if let history { try repository.archive(history) }
-            else { try repository.archiveUnreadable(accountID: accountID) }
-            var fresh = PumpHistoryLog.newIdentity()
-            fresh.ownerID = accountID; fresh.ownerEmail = storedEmail; fresh.sourceID = source; fresh.historyStart = Date()
-            fresh.reportingContextData = try JSONEncoder().encode(contexts)
-            try repository.save(fresh)
-            cancelUploads(); lifecycle = UUID()
-            history = fresh; storageError = nil; currentStatus = Status()
-            diagnosticState.lastInspection = nil; diagnosticState.inspectionError = nil
-            recordDiagnostic("history", "Started a new reporting period; previous history remains archived")
-            currentStatus.carbError = carbStorageError
-        }
-        changed()
-        Task { await sendCarbs(force: true) }
     }
 
     /// Called on the state queue. Every request-owning task belongs to this lifecycle.
@@ -484,6 +464,7 @@ public final class GlookoService: Service {
                 history = migrated; accountID = verified.id
                 if carbs == nil { restoreCarbs(verified.id) }
                 restoreDiagnostics(verified.id)
+                if insulin == nil { restoreInsulin(verified.id) }
             }
             try credentials.set(fresh.sessionCookie, service: Self.sessionService(verified.id))
             if !credentialProtectionMigrated {
@@ -549,113 +530,54 @@ public final class GlookoService: Service {
         }
         do {
             try check(generation)
-            try queue.sync {
-                try reconcileHistory()
+            let needsSubmission = try queue.sync { () throws -> Bool in
+                try reconcileInsulin()
+                return insulin?.due.isEmpty == false
             }
-            let needsSubmission = queue.sync { history?.hasUnuploadedRecords == true }
-            guard needsSubmission || force || queue.sync(execute: { currentStatus.pumpSourceLabelVerifiedAt == nil }) else { return }
+            guard needsSubmission else { return }
             var transport = try await authenticatedClient(generation)
-            if !needsSubmission {
-                try await updatePumpSourceLabel(transport, generation: generation)
-                return
-            }
-            try check(generation)
-            let prepared = try queue.sync { () throws -> (Data, UInt32, IngestionManifest, Bool)? in
-                guard lifecycle == generation, !deleted else { throw CancellationError() }
-                // Authentication is an await boundary. Include every source change received during it
-                // before creating the immutable submitted prefix, including deletions and settings.
-                try reconcileHistory()
-                guard lifecycle == generation, !deleted, doseQueryDrained, settingsQueryDrained,
-                      let context = contexts.last, context.sourceID == history?.sourceID,
-                      let settings = context.settings, var owned = history else { throw CancellationError() }
-                guard let file = try owned.exportFile(timeZone: context.timeZone, settings: settings) else { return nil }
-                let manifest = IngestionManifest(serial: owned.serial, events: file.events,
-                                                 timeZone: context.timeZone, committedThrough: owned.committedThrough,
-                                                 repairedBasalIndices: owned.repairedBasalIndices)
-                let needsRecovery = manifest.repairedBasalIndices.contains { $0 > (owned.lastUploadedIndex ?? 0) }
-                owned.markSubmitted(through: file.lastIndex)
-                try repository.save(owned)
-                history = owned; currentStatus.lastAttemptAt = Date()
-                uploadWakeRequested = false; forcedUploadRequested = false
-                return (file.data, file.lastIndex, manifest, needsRecovery)
-            }
-            guard let prepared else {
-                try await updatePumpSourceLabel(transport, generation: generation)
-                return
-            }
-            try check(generation)
-            queue.sync { recordDiagnostic("insulin", "Submitting \(prepared.0.count) bytes; \(prepared.2.records.count) final records, \(prepared.2.deferredRecords) deferred intervals") }
-            os_log("Submitting history: %d bytes, %d final records, %d deferred intervals", log: log, type: .default,
-                   prepared.0.count, prepared.2.records.count, prepared.2.deferredRecords)
-            if prepared.3 {
-                let journal: (IngestionCorrection) throws -> Void = { correction in
-                    try self.queue.sync {
-                        guard self.lifecycle == generation, !self.deleted, var owned = self.history else { throw CancellationError() }
-                        owned.recordCorrectionIntent(correction)
-                        try self.repository.save(owned)
-                        self.history = owned
-                    }
+            for _ in 0..<50 {
+                try check(generation)
+                let batch = try queue.sync { () throws -> ([InsulinOutbox.Entry], TimeZone)? in
+                    guard lifecycle == generation, !deleted else { throw CancellationError() }
+                    // Authentication is an await boundary: include every source change received during it.
+                    try reconcileInsulin()
+                    guard var outbox = insulin else { throw ServiceError.blocked(insulinStorageError ?? "Insulin storage is unavailable") }
+                    let due = Array(outbox.due.prefix(100))
+                    guard !due.isEmpty else { return nil }
+                    outbox.markSubmitted(due)
+                    try saveInsulin(outbox)
+                    currentStatus.lastAttemptAt = Date()
+                    uploadWakeRequested = false; forcedUploadRequested = false
+                    return (due, contexts.last?.timeZone ?? .current)
                 }
-                do { try await transport.repairZeroDurationBasals(prepared.2, recordIntent: journal) }
+                guard let (due, timeZone) = batch else { return }
+                queue.sync { recordDiagnostic("insulin", "Sending \(due.count) entries: \(due.filter { $0.kind == .basal }.count) basal hours, \(due.filter { $0.kind == .bolus }.count) boluses, \(due.filter(\.deleted).count) deletions") }
+                let result: (confirmed: [InsulinOutbox.Entry], heldDeleted: [InsulinOutbox.Entry], detail: String)
+                do { result = try await transport.submitInsulin(due, timeZone: timeZone) }
                 catch GlookoError.authenticationRequired {
                     transport = try await authenticatedClient(generation, replacing: transport)
                     try check(generation)
-                    try await transport.repairZeroDurationBasals(prepared.2, recordIntent: journal)
+                    result = try await transport.submitInsulin(due, timeZone: timeZone)
                 }
                 try check(generation)
-            }
-            var result = try await transport.uploadDeviceFile(prepared.0)
-            if Self.sessionExpiredStatuses.contains(result.status) {
-                transport = try await authenticatedClient(generation, replacing: transport)
-                try check(generation)
-                result = try await transport.uploadDeviceFile(prepared.0)
-            }
-            try check(generation)
-            guard (200..<300).contains(result.status), result.contentType?.lowercased().contains("text/html") != true else {
-                throw ServiceError.blocked("Glooko rejected the submission (HTTP \(result.status)); history is retained")
-            }
-            queue.sync {
-                if lifecycle == generation { currentStatus.lastUploadAt = Date(); currentStatus.verificationDetail = "Submitted; checking Glooko records" }
-            }
-            changed()
-            var verification = try await transport.verifyIngestion(prepared.2)
-            // Give asynchronous ingestion a bounded chance to finish without posting the file again.
-            // Wrong values and duplicates require review/recovery, so they are not polled as worker lag.
-            for delay in [1, 2, 4] {
-                guard !verification.confirmed, verification.missingRecords > 0,
-                      verification.mismatchedRecords == 0, verification.duplicateRecords == 0 else { break }
-                try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
-                try check(generation)
-                verification = try await transport.verifyIngestion(prepared.2)
-            }
-            try check(generation)
-            os_log("Readback: %d matched, %d missing, %d mismatched, %d duplicate, %d deferred", log: log, type: .default,
-                   verification.matchedRecords, verification.missingRecords, verification.mismatchedRecords,
-                   verification.duplicateRecords, verification.deferredRecords)
-            try queue.sync {
-                guard lifecycle == generation, !deleted, var owned = history else { throw CancellationError() }
-                currentStatus.verificationDetail = verification.detail
-                recordDiagnostic("insulin", "Readback: \(verification.matchedRecords) matched, \(verification.missingRecords) missing, \(verification.mismatchedRecords) mismatched, \(verification.duplicateRecords) duplicate, \(verification.deferredRecords) deferred")
-                currentStatus.lastError = owned.blockedReason(now: Date()) ??
-                    ((verification.mismatchedRecords > 0 || verification.duplicateRecords > 0) ? verification.detail : nil)
-                if verification.confirmed {
-                    owned.markVerified(fileIndex: prepared.1, through: prepared.2.verifiedThroughIndex, at: Date())
-                    try repository.save(owned)
-                    history = owned; currentStatus.lastConfirmedAt = Date(); currentStatus.uploadedThrough = verification.confirmedThrough
-                }
-            }
-            if verification.confirmed { try await updatePumpSourceLabel(transport, generation: generation) }
-            if verification.confirmed, let owned = queue.sync(execute: { history }),
-               let timeZone = queue.sync(execute: { contexts.last?.timeZone }) {
-                do {
-                    let audit = try await transport.auditReports(history: owned, timeZone: timeZone)
-                    try check(generation)
-                    queue.sync {
-                        currentStatus.lastReportCheckedAt = audit.checkedAt
-                        currentStatus.reportWarnings = audit.warnings; currentStatus.reportError = nil
+                let progressed = try queue.sync { () throws -> Bool in
+                    guard lifecycle == generation, !deleted, var outbox = insulin else { throw CancellationError() }
+                    for entry in result.confirmed { outbox.confirm(entry) }
+                    for entry in result.heldDeleted { outbox.supersede(entry) }
+                    if !result.heldDeleted.isEmpty { outbox.refresh(now: Date()) }
+                    try saveInsulin(outbox)
+                    currentStatus.lastUploadAt = Date(); currentStatus.verificationDetail = result.detail
+                    recordDiagnostic("insulin", result.detail)
+                    if !result.confirmed.isEmpty {
+                        currentStatus.lastConfirmedAt = Date()
+                        currentStatus.uploadedThrough = outbox.confirmedEntries.filter { $0.kind == .basal }.map(InsulinOutbox.hourEnd).max()
                     }
-                } catch is CancellationError { throw CancellationError() }
-                catch { queue.sync { if lifecycle == generation, !deleted { currentStatus.reportError = "Could not check Glooko reports: \(error)" } } }
+                    currentStatus.lastError = result.confirmed.count == due.count ? nil : "Glooko has not yet confirmed every insulin entry; they will be sent again"
+                    return result.confirmed.count == due.count || !result.heldDeleted.isEmpty
+                }
+                changed()
+                if !progressed { return }
             }
         } catch is CancellationError { }
         catch {
@@ -663,55 +585,60 @@ public final class GlookoService: Service {
         }
     }
 
-    /// Metadata verification is independent of clinical confirmation: its failure never retracts a verified upload.
-    private func updatePumpSourceLabel(_ transport: GlookoClient, generation: UUID) async throws {
-        do {
-            try check(generation)
-            let attribution = try queue.sync { () throws -> PumpAttribution in
-                guard let owned = history, let context = contexts.last, context.isRealPump,
-                      let sourceID = context.sourceID, sourceID == owned.sourceID else { throw CancellationError() }
-                return PumpAttribution(serial: owned.serial, sourceName: context.sourceName)
-            }
-            _ = try await transport.identifyLoopPump(attribution)
-            try check(generation)
-            queue.sync {
-                guard lifecycle == generation, !deleted, history?.serial == attribution.serial,
-                      let sourceID = history?.sourceID, contexts.last?.sourceID == sourceID,
-                      contexts.last?.sourceName == attribution.sourceName else { return }
-                currentStatus.pumpSourceLabel = attribution.displayName
-                currentStatus.pumpSourceLabelVerifiedAt = Date(); currentStatus.pumpSourceLabelError = nil
-            }
-        } catch is CancellationError { throw CancellationError() }
-        catch {
-            queue.sync {
-                guard lifecycle == generation, !deleted else { return }
-                currentStatus.pumpSourceLabelError = "Could not verify the Loop source label: \(error)"
-            }
+    /// Called on the state queue. Only doses from a real pump are reported; simulator and unknown sources are dropped.
+    private func reconcileInsulin() throws {
+        guard let accountID else { throw ServiceError.signInRequired }
+        if insulin == nil { restoreInsulin(accountID) }
+        guard var outbox = insulin else { throw ServiceError.blocked(insulinStorageError ?? "Insulin storage is unavailable") }
+        guard doseQueryDrained, settingsQueryDrained else { throw ServiceError.blocked("Waiting for Loop to finish reading source history and settings") }
+        guard !contexts.isEmpty else { throw ServiceError.blocked("Waiting for Loop's pump settings") }
+        let captured = contexts
+        let before = outbox.doses.count
+        outbox.retainDoses { dose in
+            let source = captured.last(where: { $0.date <= dose.start }) ?? captured.first
+            return source?.isRealPump == true
+        }
+        if outbox.doses.count < before {
+            recordDiagnostic("source", "Excluded \(before - outbox.doses.count) doses from a simulator or unknown pump")
+        }
+        outbox.refresh(now: Date())
+        outbox.prune(now: Date())
+        if outbox != insulin { try saveInsulin(outbox) }
+        guard contexts.last?.isRealPump == true || outbox.due.isEmpty == false else {
+            throw ServiceError.blocked("Uploads are paused while a real pump source is unavailable")
         }
     }
 
-    /// Called on the state queue, both before authentication and at the submission-intent boundary.
-    private func reconcileHistory() throws {
-        guard storageError == nil else { throw ServiceError.blocked(storageError!) }
-        guard doseQueryDrained, settingsQueryDrained else { throw ServiceError.blocked("Waiting for Loop to finish reading source history and settings") }
-        guard let context = contexts.last, context.isRealPump else { throw ServiceError.blocked("Uploads are paused while a real pump source is unavailable") }
-        guard context.settings != nil else { throw ServiceError.blocked(context.problem ?? "Waiting for complete Loop settings") }
-        guard var owned = history else { throw HistoryRepository.Failure.missingHistory }
-        if owned.sourceID == nil { owned.sourceID = context.sourceID }
-        guard owned.sourceID == context.sourceID else { throw ServiceError.blocked("The connected pump has changed. Review the source before starting a new reporting period.") }
-        let captured = contexts
-        owned.classifyStaged { dose in
-            let source = captured.last(where: { $0.date <= dose.start }) ?? captured.first
-            if captured.contains(where: { $0.date > dose.start && $0.date < dose.end && $0.sourceID != source?.sourceID }) {
-                return "unverified-pump-source"
+    /// A failed restoration remains visible. A first run cuts over from the retired pump-file history.
+    private func restoreInsulin(_ accountID: String) {
+        do {
+            if let saved = try insulinRepository.load(accountID: accountID) { insulin = saved }
+            else {
+                // Never cut over from damaged or missing history: that would silently abandon its unsent doses.
+                if let storageError { throw ServiceError.blocked(storageError) }
+                guard let history else { throw HistoryRepository.Failure.missingHistory }
+                let outbox = InsulinOutbox.cutOver(from: history, now: Date())
+                try insulinRepository.save(outbox, accountID: accountID)
+                insulin = outbox
+                // Status from the retired pump-file route does not describe these entries.
+                currentStatus.verificationDetail = nil; currentStatus.uploadedThrough = nil; currentStatus.lastConfirmedAt = nil
+                currentStatus.lastUploadAt = nil; currentStatus.reportWarnings = []; currentStatus.lastReportCheckedAt = nil
+                currentStatus.pumpSourceLabel = nil; currentStatus.pumpSourceLabelVerifiedAt = nil; currentStatus.pumpSourceLabelError = nil
+                recordDiagnostic("insulin", "Insulin entries start at \(GlookoClient.isoTimestamp(outbox.reportingStart)); earlier delivery stays with the previous upload route")
             }
-            return source?.sourceID ?? (source == nil ? nil : "unverified-pump-source")
+            insulinStorageError = nil
+        } catch {
+            insulin = nil
+            insulinStorageError = "Could not restore insulin uploads: \(error)"
+            currentStatus.lastError = insulinStorageError
         }
-        owned.commit(now: Date(), timeZone: context.timeZone)
-        try repository.save(owned)
-        history = owned
-        currentStatus.lastError = owned.blockedReason(now: Date())
-        if let reason = currentStatus.lastError { throw ServiceError.blocked(reason) }
+    }
+
+    /// Called on the state queue.
+    private func saveInsulin(_ outbox: InsulinOutbox) throws {
+        guard let accountID else { throw ServiceError.signInRequired }
+        try insulinRepository.save(outbox, accountID: accountID)
+        insulin = outbox
     }
 
     // MARK: Carbs
@@ -853,17 +780,14 @@ public final class GlookoService: Service {
         let evaluation = queue.sync { () -> GlookoSyncHealth.Delivery in
             guard !deleted, onboarded else { return .init(issue: [], retract: []) }
             var pending = Set<GlookoSyncHealth.Stream>()
-            if insulinEnabled, history?.hasUnuploadedRecords == true || history?.pending.values.contains(where: { !$0.isMutable && $0.end < Date().addingTimeInterval(-3600) }) == true { pending.insert(.insulin) }
+            if insulinEnabled, insulin?.due.isEmpty == false { pending.insert(.insulin) }
             if carbs?.due.isEmpty == false { pending.insert(.carbs) }
-            var reason = storageError ?? carbStorageError
+            var reason = insulinStorageError ?? carbStorageError
             if sourceReplayRequired { reason = currentStatus.sourceReplayDetail }
             if insulinEnabled {
-                reason = reason ?? history?.blockedReason(now: Date())
-                if Date().timeIntervalSince(connectedAt) > 300 {
-                    if contexts.last?.isRealPump != true { reason = reason ?? "A real pump source is unavailable. Insulin uploads are paused." }
-                    else if contexts.last?.settings == nil { reason = reason ?? contexts.last?.problem ?? "Complete pump settings are unavailable. Insulin uploads are paused." }
+                if Date().timeIntervalSince(connectedAt) > 300, contexts.last?.isRealPump != true {
+                    reason = reason ?? "A real pump source is unavailable. Insulin uploads are paused."
                 }
-                if let source = history?.sourceID, let latest = contexts.last?.sourceID, source != latest { reason = "The connected pump source changed. Insulin uploads are paused." }
                 if let waiting = sourceStreamsWaitingSince, Date().timeIntervalSince(waiting) > alertThreshold { reason = "Loop has not finished reading the dose and settings streams. Insulin uploads are paused." }
             }
             let delivery = syncHealth.notifications(pending: pending, pausedReason: reason, threshold: alertThreshold, canDeliver: serviceDelegate != nil)
@@ -919,8 +843,8 @@ public final class GlookoService: Service {
             return .init(state: diagnosticState, storageError: diagnosticStorageError ?? retiredDataCleanupError, checking: inspectionTask != nil,
                 doseQueryDrained: doseQueryDrained, settingsQueryDrained: settingsQueryDrained,
                 pendingCarbs: carbs?.due.count ?? 0,
-                pendingDoses: (history?.pending.count ?? 0) + (history?.unclassified.count ?? 0),
-                latestSourceDose: history?.sourceDoses.values.map(\.start).max(),
+                pendingDoses: insulin?.due.count ?? 0,
+                latestSourceDose: insulin?.doses.values.map(\.start).max(),
                 nextPumpAttempt: currentStatus.lastAttemptAt?.addingTimeInterval(uploadInterval))
         }
     }
@@ -969,18 +893,24 @@ public final class GlookoService: Service {
                 }
                 do {
                     let transport = try await self.authenticatedClient(generation)
-                    let captured = try self.queue.sync { () throws -> (PumpHistoryLog, TimeZone) in
-                        guard self.lifecycle == generation, !self.deleted, let history = self.history,
-                              let context = self.contexts.last else { throw ServiceError.blocked("Source history or pump settings are unavailable") }
-                        self.recordDiagnostic("live check", "Starting read-only pump record verification")
-                        return (history, context.timeZone)
+                    let captured = try self.queue.sync { () throws -> ([InsulinOutbox.Entry], TimeZone) in
+                        guard self.lifecycle == generation, !self.deleted, let outbox = self.insulin else {
+                            throw ServiceError.blocked(self.insulinStorageError ?? "Insulin history is unavailable")
+                        }
+                        self.recordDiagnostic("live check", "Starting read-only insulin entry verification")
+                        return (outbox.confirmedEntries, self.contexts.last?.timeZone ?? .current)
                     }
-                    let report = try await transport.inspectSync(history: captured.0, timeZone: captured.1)
+                    let found = try await transport.verifyInsulin(captured.0, timeZone: captured.1)
                     try self.check(generation)
+                    let report = GlookoSyncInspection(checkedAt: Date(), sourceSnapshotAt: Date(),
+                        day: String(WallClock(timeZone: captured.1).string(Date()).prefix(10)),
+                        insulinVerified: found.missing == 0 && found.different == 0, insulinMatched: found.matched,
+                        insulinMissing: found.missing, insulinMismatched: found.different, insulinDuplicates: 0,
+                        insulinDeferred: 0, reportWarnings: [])
                     self.queue.sync {
                         guard self.lifecycle == generation, !self.deleted else { return }
                         self.diagnosticState.lastInspection = report; self.diagnosticState.inspectionError = nil
-                        self.recordDiagnostic("live check", "Insulin: \(report.insulinMatched) matched, \(report.insulinMissing) missing, \(report.insulinMismatched) different, \(report.insulinDuplicates) duplicate")
+                        self.recordDiagnostic("live check", "Insulin: \(report.insulinMatched) matched, \(report.insulinMissing) missing, \(report.insulinMismatched) different")
                     }
                 } catch is CancellationError { }
                 catch {
@@ -1018,10 +948,11 @@ extension GlookoService: RemoteDataService {
     public func uploadDoseData(created: [DoseEntry], deleted: [DoseEntry], completion: @escaping (Result<Bool, Error>) -> Void) {
         do {
             try queue.sync {
-                guard !self.deleted, var owned = history else { throw ServiceError.blocked(storageError ?? "Sign in before storing pump history") }
-                owned.stage(created: created.compactMap(\.sourceDose), deleted: deleted.compactMap(\.sourceDose))
-                try repository.save(owned)
-                history = owned
+                guard !self.deleted, let accountID else { throw ServiceError.blocked("Sign in before storing pump history") }
+                if insulin == nil { restoreInsulin(accountID) }
+                guard var outbox = insulin else { throw ServiceError.blocked(insulinStorageError ?? "Insulin storage is unavailable") }
+                outbox.stage(created: created.compactMap(\.sourceDose), deleted: deleted.compactMap(\.sourceDose))
+                try saveInsulin(outbox)
                 doseQueryDrained = created.isEmpty && deleted.isEmpty
                 noteSourceDrain()
                 diagnosticState.lastDoseCallback = Date()

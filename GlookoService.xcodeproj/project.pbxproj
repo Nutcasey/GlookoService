@@ -39,6 +39,7 @@
 		B5548BDAE8F6037318F18372 /* GlookoServiceKitPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF2ECD0DFF0D8CFC155B885C /* GlookoServiceKitPlugin.swift */; };
 		B640E4795B21F015134E4296 /* Records.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA8AC0BCA3CB800D9AD3C81 /* Records.swift */; };
 		C2EF8412E30C8339F9D3A2E9 /* GlookoServiceKit.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 3D0F3BDEDB49D12884F88E08 /* GlookoServiceKit.framework */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		C92B1F02FC94DC38599E4EE8 /* InsulinOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6E563E268B7B52659C44303 /* InsulinOutbox.swift */; };
 		C9B628A9C4B5B7159C4BC953 /* PumpHistoryLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96C9531BA7197B9BEA854487 /* PumpHistoryLog.swift */; };
 		D5ABF0F9C06A7465FC8165E5 /* LoopKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4B7525F927564C2D84B0BCBA /* LoopKit.framework */; };
 		D68D68B81D456B7923772C2F /* PumpHistoryIBF.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66DD61AC3ADCCB2555C03457 /* PumpHistoryIBF.swift */; };
@@ -154,6 +155,7 @@
 		D7108DDD9DB3930ADF5CD48C /* GlookoServiceKitTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = GlookoServiceKitTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E0A61A29622C7D2B0AE2FABC /* HistoryRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryRepository.swift; sourceTree = "<group>"; };
 		E6C12599142AA47FE8DDB88F /* DeviceFileUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceFileUpload.swift; sourceTree = "<group>"; };
+		F6E563E268B7B52659C44303 /* InsulinOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsulinOutbox.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -221,6 +223,7 @@
 				03409173E592B661BC461774 /* IBFPumpSettings.swift */,
 				A2BD0A48924061E162D135AF /* IngestionRecovery.swift */,
 				5A917AE55EB6F91E886A531F /* IngestionVerifier.swift */,
+				F6E563E268B7B52659C44303 /* InsulinOutbox.swift */,
 				358DF5D8E88247BE130A7565 /* PumpAttribution.swift */,
 				66DD61AC3ADCCB2555C03457 /* PumpHistoryIBF.swift */,
 				96C9531BA7197B9BEA854487 /* PumpHistoryLog.swift */,
@@ -530,6 +533,7 @@
 				6FA3248B72BBEFE19383654D /* IBFPumpSettings.swift in Sources */,
 				04E0F8691AA7347912866BDB /* IngestionRecovery.swift in Sources */,
 				66394DA81E868BAF823914F5 /* IngestionVerifier.swift in Sources */,
+				C92B1F02FC94DC38599E4EE8 /* InsulinOutbox.swift in Sources */,
 				9A472719472E5EFFA4BCEB43 /* PumpAttribution.swift in Sources */,
 				D68D68B81D456B7923772C2F /* PumpHistoryIBF.swift in Sources */,
 				C9B628A9C4B5B7159C4BC953 /* PumpHistoryLog.swift in Sources */,

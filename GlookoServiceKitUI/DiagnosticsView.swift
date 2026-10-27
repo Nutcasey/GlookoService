@@ -26,7 +26,7 @@ import GlookoServiceKit
             lines += ["Latest read-only verification (JSON):", String(decoding: encoded, as: UTF8.self)]
         }
         for error in [data.storageError, data.state.inspectionError, snapshot.status.lastError,
-                      snapshot.status.carbError, snapshot.status.pumpSourceLabelError].compactMap({ $0 }) {
+                      snapshot.status.carbError].compactMap({ $0 }) {
             lines.append("Error: " + GlookoClient.redact(error))
         }
         lines += data.state.events.map { "\($0.date) [\($0.category)] \($0.message)" }
@@ -53,12 +53,12 @@ struct DiagnosticsView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section(footer: Text("This fetches Glooko's stored records and graph again. It does not send data or prove which screen the Glooko app is displaying.")) {
+                Section(footer: Text("This fetches Glooko's stored insulin entries again. It does not send data or prove which screen the Glooko app is displaying.")) {
                     Button(model.checking || model.data.checking ? "Checking Glooko…" : "Check Glooko now") { model.check() }
                         .disabled(model.checking || model.data.checking).accessibilityIdentifier("glooko-live-check")
                     if let report = model.data.state.lastInspection {
                         row("Last check", time(report.checkedAt))
-                        Text(report.insulinVerified ? "All eligible final insulin records matched Glooko at the last check." : "Some insulin records need review. See the counts below.")
+                        Text(report.insulinVerified ? "Every confirmed insulin entry matched Glooko at the last check." : "Some insulin entries need review. See the counts below.")
                             .foregroundColor(report.insulinVerified ? .primary : .orange).accessibilityIdentifier("glooko-live-check-result")
                     }
                     if let error = model.data.state.inspectionError {
@@ -66,22 +66,21 @@ struct DiagnosticsView: View {
                         Text(error).foregroundColor(.red)
                     }
                 }
-                Section(header: Text("Pump history and queues"), footer: Text("Pump history settles for one hour before it is sent. Automatic pump submissions are checked at 15-minute intervals. A successful source-label check is separate from clinical uploads.")) {
+                Section(header: Text("Insulin and queues"), footer: Text("Boluses are sent 10 minutes after they finish and basal hours 15 minutes after the hour ends. Automatic uploads run at 15-minute intervals; Upload now sends immediately.")) {
                     row("Last dose callback", time(model.data.state.lastDoseCallback))
                     row("Latest source dose", time(model.data.latestSourceDose))
                     row("Last settings callback", time(model.data.state.lastSettingsCallback))
                     row("Dose query finished", model.data.doseQueryDrained ? "Yes" : "No")
                     row("Settings query finished", model.data.settingsQueryDrained ? "Yes" : "No")
-                    row("Doses awaiting finalisation", String(model.data.pendingDoses))
+                    row("Insulin entries waiting", String(model.data.pendingDoses))
                     row("Carbs awaiting confirmation", String(model.data.pendingCarbs))
                     row("Last carb confirmation", time(model.snapshot.status.lastCarbConfirmedAt))
-                    row("Final history through", time(model.snapshot.summary.committedThrough))
-                    row("Last file submission", time(model.snapshot.status.lastUploadAt))
-                    row("Last record confirmation", time(model.snapshot.status.lastConfirmedAt))
+                    row("Basal ready through", time(model.snapshot.summary.committedThrough))
+                    row("Last insulin sent", time(model.snapshot.status.lastUploadAt))
+                    row("Last insulin confirmation", time(model.snapshot.status.lastConfirmedAt))
                     if let report = model.data.state.lastInspection {
-                        row("Final pump records matched", String(report.insulinMatched))
-                        row("Missing / different / duplicate", "\(report.insulinMissing) / \(report.insulinMismatched) / \(report.insulinDuplicates)")
-                        row("Recent intervals deferred", String(report.insulinDeferred))
+                        row("Insulin entries matched", String(report.insulinMatched))
+                        row("Missing / different", "\(report.insulinMissing) / \(report.insulinMismatched)")
                     }
                     ForEach([model.snapshot.status.lastError, model.snapshot.status.carbError].compactMap { $0 }, id: \.self) { Text($0).foregroundColor(.red) }
                 }

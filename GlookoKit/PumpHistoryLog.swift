@@ -303,6 +303,9 @@ public struct PumpHistoryLog: Codable, Equatable, Sendable {
         submittedIDs = Set(committed.keys)
     }
 
+    /// The last boundary which may have reached Glooko through a submitted file.
+    public var submittedBoundary: Date? { submissionBoundary }
+
     private var submissionBoundary: Date? {
         if let submittedThrough { return submittedThrough }
         // Migration of old files whose lastSubmittedIndex was recorded without an explicit checkpoint.

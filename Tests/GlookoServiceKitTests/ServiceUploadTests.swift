@@ -103,7 +103,7 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertEqual(restored.glucoseDataLimit, 0, "Loop must not query glucose for this service")
         XCTAssertFalse(try XCTUnwrap(result).get(), "The service must not claim to upload glucose")
         await restored.uploadIfNeeded(force: true)
-        XCTAssertNil(OfflineGlooko.uploadedFile)
+        XCTAssertTrue(OfflineGlooko.insulinRecords.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: accountFolder.appendingPathComponent("glucose.json").path))
     }
 
@@ -114,7 +114,7 @@ final class ServiceUploadTests: XCTestCase {
         let basal = DoseEntry(type: .basal, startDate: start, endDate: start.addingTimeInterval(3600), value: 1, unit: .unitsPerHour, syncIdentifier: "basal")
         original.uploadDoseData(created: [basal], deleted: []) { _ in }
         original.uploadDoseData(created: [], deleted: []) { _ in }
-        try await eventually { OfflineGlooko.uploadedFile != nil }
+        try await eventually { !OfflineGlooko.insulinRecords.isEmpty }
         // Relaunch long after the service was connected, with Loop restarting both source streams.
         var state = original.rawState
         state["connectedAt"] = Date().addingTimeInterval(-7200)
@@ -149,7 +149,7 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertEqual(OfflineGlooko.signInCount, 2, "One interactive login and one shared recovery; no replay after rejection")
         XCTAssertEqual(service.summary.pendingCarbs, 1)
         XCTAssertEqual(OfflineGlooko.foodWriteCount, 0)
-        XCTAssertNil(OfflineGlooko.uploadedFile)
+        XCTAssertTrue(OfflineGlooko.insulinRecords.isEmpty)
     }
 
     func testAnEditDuringSubmissionIsDrainedAndReadbackUsesRecentUpdateTime() async throws {
@@ -234,10 +234,9 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertGreaterThan(OfflineGlooko.cancelledRequests, 0)
     }
 
-    func testSourceDeletionDuringAuthenticationIsAppliedBeforeFileSubmission() async throws {
+    func testSourceDeletionDuringAuthenticationIsAppliedBeforeInsulinSubmission() async throws {
         let service = try await signedIn()
-        let complete = completeSettings()
-        service.uploadSettingsData([complete]) { _ in }
+        service.uploadSettingsData([completeSettings()]) { _ in }
         service.uploadSettingsData([]) { _ in }
         service.uploadDoseData(created: [], deleted: []) { _ in }
         await service.uploadIfNeeded(force: true)
@@ -245,30 +244,36 @@ final class ServiceUploadTests: XCTestCase {
         try await Task.sleep(nanoseconds: 100_000_000)
         let basal = DoseEntry(type: .basal, startDate: start, endDate: start.addingTimeInterval(3600), value: 1, unit: .unitsPerHour, syncIdentifier: "basal")
         let bolus = DoseEntry(type: .bolus, startDate: start.addingTimeInterval(600), value: 1, unit: .units, deliveredUnits: 1, syncIdentifier: "bolus")
+        // Later delivery lets the basal's second clock hour finish; an hour is never sent past the latest evidence.
+        let after = DoseEntry(type: .tempBasal, startDate: start.addingTimeInterval(3600), endDate: Date().addingTimeInterval(-1800), value: 0, unit: .unitsPerHour, syncIdentifier: "after")
         OfflineGlooko.hold("GET /api/v2/users")
-        service.uploadDoseData(created: [basal, bolus], deleted: []) { _ in }
+        service.uploadDoseData(created: [basal, bolus, after], deleted: []) { _ in }
         service.uploadDoseData(created: [], deleted: []) { _ in }
         try await eventually { OfflineGlooko.hasHeldRequest }
         service.uploadDoseData(created: [], deleted: [bolus]) { _ in }
         service.uploadDoseData(created: [], deleted: []) { _ in }
         OfflineGlooko.release()
-        try await eventually { OfflineGlooko.uploadedFile != nil }
-        let bytes = Array(try XCTUnwrap(OfflineGlooko.uploadedFile))
-        var offset = 0, bolusRecords = 0
-        while offset + 2 < bytes.count {
-            let size = Int(bytes[offset]) * 256 + Int(bytes[offset + 1])
-            guard size > 2, offset + size + 2 <= bytes.count else { return XCTFail("Invalid submitted IBF framing") }
-            let body = offset + 2
-            if size >= 31, bytes[body] == 3 {
-                let kind = (0..<4).reduce(0) { $0 | (Int(bytes[body + 21 + $1]) << (8 * $1)) }
-                if kind == 4 { bolusRecords += 1 }
-            }
-            offset += size + 2
-        }
-        XCTAssertEqual(bolusRecords, 0)
-        XCTAssertEqual(service.summary.conflictCount, 0)
+        try await eventually { !OfflineGlooko.insulinRecords.isEmpty && service.summary.pendingDoses == 0 }
+        let records = OfflineGlooko.insulinRecords
+        XCTAssertFalse(records.contains { $0["insulinType"] as? String == "bolus" }, "The deleted bolus must never be sent")
+        XCTAssertEqual(records.filter { $0["insulinType"] as? String == "basal" }.reduce(0) { $0 + (($1["value"] as? NSNumber)?.doubleValue ?? 0) }, 1, accuracy: 0.0005)
+        XCTAssertTrue(records.allSatisfy { $0["medicationGuid"] is NSNull && ($0["deviceDelivered"] as? Int) == 1 })
     }
 
+    func testDamagedLegacyPumpHistoryNeverCutsOverToAFreshInsulinOutbox() async throws {
+        let service = try await signedIn()
+        let state = service.rawState
+        services.forEach { $0.completeDelete() }; services = []
+        try FileManager.default.removeItem(at: accountFolder.appendingPathComponent("insulin.json"))
+        try FileManager.default.removeItem(at: accountFolder.appendingPathComponent("insulin-initialised"))
+        try Data("damaged history".utf8).write(to: accountFolder.appendingPathComponent("pump-history.json"))
+        let restored = try XCTUnwrap(GlookoService(rawState: state)); services.append(restored)
+        let bolus = DoseEntry(type: .bolus, startDate: start, value: 1, unit: .units, deliveredUnits: 1, syncIdentifier: "bolus")
+        var outcome: Result<Bool, Error>?
+        restored.uploadDoseData(created: [bolus], deleted: []) { outcome = $0 }
+        XCTAssertThrowsError(try XCTUnwrap(outcome).get(), "Loop must keep the dose until the history is restored")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: accountFolder.appendingPathComponent("insulin.json").path))
+    }
 
 }
 
@@ -291,12 +296,12 @@ private final class OfflineGlooko: URLProtocol {
     private static var heldKey: String?
     private static var held: OfflineGlooko?
     private static var since: Date?
-    private static var uploaded: Data?
+    private static var insulins: [String: [String: Any]] = [:]
     private static var cancellations = 0
     private var stopped = false
     private static func access<T>(_ action: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return action() }
 
-    static func reset(accountID: String) { access { account = accountID; rejectCredentials = false; signIns = 0; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; uploaded = nil; cancellations = 0 } }
+    static func reset(accountID: String) { access { account = accountID; rejectCredentials = false; signIns = 0; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; insulins = [:]; cancellations = 0 } }
     static var signInCount: Int { access { signIns } }
     static func expireSessionAndRejectPassword() { access { rejectCredentials = true } }
     static func hold(_ key: String) { access { heldKey = key } }
@@ -304,7 +309,7 @@ private final class OfflineGlooko: URLProtocol {
     static var foodWriteCount: Int { access { writes } }
     static var foodGrams: Double? { access { (foods.values.first?["carbs"] as? NSNumber)?.doubleValue } }
     static var foodReadSince: Date? { access { since } }
-    static var uploadedFile: Data? { access { uploaded } }
+    static var insulinRecords: [[String: Any]] { access { Array(insulins.values) } }
     static var cancelledRequests: Int { access { cancellations } }
     static func failNextFoodWrite() { access { failWrite = true } }
     static func release() { let request = access { () -> OfflineGlooko? in let old = held; held = nil; heldKey = nil; return old }; request?.reply() }
@@ -349,9 +354,15 @@ private final class OfflineGlooko: URLProtocol {
                 Self.since = value.flatMap(parser.date(from:))
                 payload = ["foods": Array(Self.foods.values)]
             } else if path == "/api/v2/meals" { status = 204 }
-            else if path == "/api/v3/device/file/upload" {
-                Self.uploaded = data
-            }
+            else if path == "/api/v2/insulins", request.httpMethod == "PUT" {
+                let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                for entry in object?["insulins"] as? [[String: Any]] ?? [] {
+                    // Like Glooko, a soft-deleted GUID is never revived by a later live upsert.
+                    guard let id = entry["guid"] as? String, (Self.insulins[id]?["softDeleted"] as? Int) != 1 else { continue }
+                    Self.insulins[id] = entry
+                }
+                status = 204
+            } else if path == "/api/v2/insulins" { payload = ["insulins": Array(Self.insulins.values)] }
             else if path == "/api/v2/pumps" { payload = ["pumps": []] }
             else if path != "/api/v3/users/activities_and_event_data_sync/complete" { status = 500 }
             payload["lastPage"] = true; payload["lastUpdatedAt"] = GlookoClient.isoTimestamp(Date()); payload["lastGuid"] = "offline"
