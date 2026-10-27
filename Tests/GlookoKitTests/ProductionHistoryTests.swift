@@ -174,6 +174,11 @@ final class ProductionHistoryTests: XCTestCase {
         XCTAssertEqual(try DecodedIBF(file(&log)).bolus, 2)
         XCTAssertNil(log.lastUploadedIndex)
         XCTAssertNotNil(log.sourceDoses["old"])
+        let firstFile = try XCTUnwrap(log.exportFile(timeZone: zone, settings: fixtureSettings()))
+        log.markVerified(fileIndex: firstFile.lastIndex, through: 1001, at: at(21 * 24))
+        log.ingest(created: [basal("continued", 20 * 24, 22 * 24)])
+        log.commit(now: at(23 * 24), timeZone: zone, settleDelay: 0)
+        XCTAssertEqual(try DecodedIBF(file(&log)).bolus, 2, "Verifying a file's final subset must not prune its unconfirmed prefix")
     }
 
     func testMutableZeroDurationSuspensionRemainsUntilItsSourceFinalisesIt() throws {
@@ -213,6 +218,57 @@ final class ProductionHistoryTests: XCTestCase {
         XCTAssertEqual(parsed.profiles[14]?.first, 126)
     }
 
+    func testFractionalSourceArrivalsAcrossSavedSubmissionPreserveContinuousDeliveryAndRealGaps() throws {
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(".build/fractional-windows-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = HistoryRepository(directory: directory)
+        for gap in [0.0, 1.0] {
+            var log = fresh(); log.ownerID = "fractional-\(gap)"; log.ownerEmail = "offline@example.test"
+            let end = origin.addingTimeInterval(300.972785)
+            log.ingest(created: [SourceDose(id: "temp", kind: .tempBasal, start: origin.addingTimeInterval(0.718017),
+                                          end: end, rate: 0, delivered: 0)])
+            log.commit(now: origin.addingTimeInterval(7500), timeZone: zone)
+            let first = try XCTUnwrap(log.exportFile(timeZone: zone, settings: fixtureSettings()))
+            log.markSubmitted(through: first.lastIndex)
+            let prefix = log.records
+            try repository.save(log)
+            log = try repository.loadExisting(accountID: log.ownerID, legacyEmail: nil)
+            let resumed = end.addingTimeInterval(gap), finished = resumed.addingTimeInterval(3600)
+            log.ingest(created: [SourceDose(id: "resumed", kind: .basal, start: resumed, end: finished, rate: 0.43),
+                                 SourceDose(id: "close", kind: .basal, start: finished, end: finished.addingTimeInterval(3600), rate: 0)])
+            log.commit(now: origin.addingTimeInterval(15000), timeZone: zone)
+            XCTAssertEqual(Array(log.records.prefix(prefix.count)), prefix)
+            let decoded = try DecodedIBF(file(&log))
+            XCTAssertEqual(decoded.basal, 0.43, accuracy: 0.000002)
+            XCTAssertEqual(decoded.events.filter { $0.kind == 16 }.count, gap == 0 ? 0 : 1)
+            XCTAssertEqual(decoded.events.filter { $0.kind == 65536 }.count, gap == 0 ? 0 : 1)
+        }
+    }
+
+    func testReadbackDefersAnIntervalUntilItsClosingBasalIsFinal() throws {
+        let events = [IBFHistoryEvent(index: 1, date: at(0), record: .basal(rate: 0.49, tempMinutes: 0)),
+                      IBFHistoryEvent(index: 2, date: origin.addingTimeInterval(815), record: .basal(rate: 0.5, tempMinutes: 0)),
+                      IBFHistoryEvent(index: 3, date: origin.addingTimeInterval(841), record: .basal(rate: 0.49, tempMinutes: 0), inProgress: true)]
+        let pumps: [[String: Any]] = [["serialNumber": "999000999", "guid": "offline-pump", "softDeleted": false]]
+        // Literal readback follows the independently observed native importer response.
+        let first: [String: Any] = ["guid": "first", "pumpGuid": "offline-pump", "softDeleted": false,
+                                    "pumpTimestamp": "2026-10-01T00:00:00.000Z", "duration": 815, "rate": 0.49]
+        let manifest = IngestionManifest(serial: 999000999, events: events, timeZone: zone, committedThrough: origin.addingTimeInterval(1100))
+        let report = manifest.evaluate(pumps: pumps, rows: ["scheduled_basals": [first]])
+        XCTAssertTrue(report.confirmed)
+        XCTAssertEqual(report.deferredRecords, 1)
+        XCTAssertEqual(report.confirmedThrough, origin.addingTimeInterval(815))
+        XCTAssertEqual(manifest.verifiedThroughIndex, 1)
+        var advanced = events; advanced[2].inProgress = false
+        advanced.append(.init(index: 4, date: origin.addingTimeInterval(1500), record: .basal(rate: 0.48, tempMinutes: 0), inProgress: true))
+        let next = IngestionManifest(serial: 999000999, events: advanced, timeZone: zone, committedThrough: origin.addingTimeInterval(1600))
+        XCTAssertFalse(next.evaluate(pumps: pumps, rows: ["scheduled_basals": [first]]).confirmed)
+        let second: [String: Any] = ["guid": "second", "pumpGuid": "offline-pump", "softDeleted": false,
+                                     "pumpTimestamp": "2026-10-01T00:13:35.000Z", "duration": 26, "rate": 0.5]
+        XCTAssertTrue(next.evaluate(pumps: pumps, rows: ["scheduled_basals": [first, second]]).confirmed)
+    }
+
     func testPatientScopedMigrationPreservesIndicesAndNeverFallsBackAfterCorruption() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent(".build/history-test-\(UUID().uuidString)")
@@ -244,7 +300,7 @@ final class ProductionHistoryTests: XCTestCase {
         let start = ISO8601DateFormatter().date(from: "2026-10-01T00:00:00Z")!
         let events = [IBFHistoryEvent(index: 1, date: start, record: .basal(rate: 1, tempMinutes: 0)),
                       IBFHistoryEvent(index: 2, date: start.addingTimeInterval(1800), record: .bolus(delivered: 0.5, immediateSeconds: 20)),
-                      IBFHistoryEvent(index: 3, date: start.addingTimeInterval(3600), record: .basal(rate: 0, tempMinutes: 0), inProgress: true)]
+                      IBFHistoryEvent(index: 3, date: start.addingTimeInterval(3600), record: .basal(rate: 0, tempMinutes: 0))]
         let manifest = IngestionManifest(serial: 999000999, events: events, timeZone: zone, committedThrough: start.addingTimeInterval(3600))
         let pumps: [[String: Any]] = [["serialNumber": "999000999", "guid": "patient-pump", "softDeleted": false]]
         let basal: [String: Any] = ["guid": "basal-row", "pumpGuid": "patient-pump", "softDeleted": false,
@@ -258,6 +314,12 @@ final class ProductionHistoryTests: XCTestCase {
         }
         XCTAssertFalse(manifest.evaluate(pumps: pumps, rows: ["scheduled_basals": [basal]]).confirmed)
         XCTAssertFalse(manifest.evaluate(pumps: [], rows: ["scheduled_basals": [basal], "normal_boluses": [bolus]]).confirmed)
+        var wrongRate = basal; wrongRate["rate"] = 0
+        XCTAssertEqual(manifest.evaluate(pumps: pumps, rows: ["scheduled_basals": [wrongRate], "normal_boluses": [bolus]]).mismatchedRecords, 1)
+        var duplicate = basal; duplicate["guid"] = "duplicate"
+        let duplicated = manifest.evaluate(pumps: pumps, rows: ["scheduled_basals": [basal, duplicate], "normal_boluses": [bolus]])
+        XCTAssertFalse(duplicated.confirmed)
+        XCTAssertEqual(duplicated.duplicateRecords, 1)
     }
 
     func testMalformedResourcesReturnErrorsBeforeNetworkAndManualBuildersUseExplicitZone() async throws {

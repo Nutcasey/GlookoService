@@ -224,6 +224,9 @@ struct StatusView: View {
                 row("Confirmed through", text(model.snapshot.status.uploadedThrough))
                 row("History through", text(model.snapshot.summary.committedThrough))
                 row("Waiting to verify", model.snapshot.summary.hasUnuploadedRecords ? "Yes" : "No")
+                if model.snapshot.summary.correctedBasalIntervals > 0 {
+                    row("Corrected basal intervals", String(model.snapshot.summary.correctedBasalIntervals))
+                }
                 if let detail = model.snapshot.status.verificationDetail { Text(detail).foregroundColor(.secondary) }
                 if let error = model.snapshot.status.lastError { Text(error).foregroundColor(.red).accessibilityIdentifier("glooko-error") }
                 Button(model.uploading ? "Uploading…" : "Upload now") { model.uploadNow() }

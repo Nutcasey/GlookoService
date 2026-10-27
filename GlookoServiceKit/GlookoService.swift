@@ -33,6 +33,7 @@ public final class GlookoService: Service {
         public var sourceName: String?
         public var canStartNewPeriod: Bool
         public var pendingCarbs: Int
+        public var correctedBasalIntervals: Int
     }
     public struct Snapshot {
         public var email: String?
@@ -98,6 +99,7 @@ public final class GlookoService: Service {
         currentStatus.lastUploadAt = rawState["lastUploadAt"] as? Date
         currentStatus.lastAttemptAt = rawState["lastAttemptAt"] as? Date
         currentStatus.lastError = rawState["lastError"] as? String
+        currentStatus.verificationDetail = rawState["verificationDetail"] as? String
         currentStatus.lastCarbConfirmedAt = rawState["lastCarbConfirmedAt"] as? Date
         carbAnchorReset = rawState["carbAnchorReset"] as? Bool ?? false
         carbIdentityVersion = rawState["carbIdentityVersion"] as? Int ?? 0
@@ -151,7 +153,8 @@ public final class GlookoService: Service {
                                       canStartNewPeriod: accountID != nil && contexts.last?.isRealPump == true && contexts.last?.settings != nil &&
                                         (storageError != nil || history?.blockedReason(now: Date()) != nil ||
                                          (history?.sourceID != nil && history?.sourceID != contexts.last?.sourceID)),
-                                      pendingCarbs: carbs?.due.count ?? 0))
+                                      pendingCarbs: carbs?.due.count ?? 0,
+                                      correctedBasalIntervals: Set(history?.ingestionCorrections.values.filter { $0.confirmedAt != nil }.map(\.index) ?? []).count))
         }
     }
 
@@ -162,6 +165,7 @@ public final class GlookoService: Service {
             value["legacyCredentialsOwned"] = ownsLegacyCredentials
             value["lastUploadAt"] = currentStatus.lastUploadAt; value["lastAttemptAt"] = currentStatus.lastAttemptAt
             value["lastError"] = currentStatus.lastError; value["uploadedThrough"] = currentStatus.uploadedThrough
+            value["verificationDetail"] = currentStatus.verificationDetail
             value["lastConfirmedAt"] = currentStatus.lastConfirmedAt
             value["lastCarbConfirmedAt"] = currentStatus.lastCarbConfirmedAt
             value["carbAnchorReset"] = carbAnchorReset
@@ -373,7 +377,7 @@ public final class GlookoService: Service {
             guard queue.sync(execute: { history?.hasUnuploadedRecords == true }) else { return }
             var transport = try await authenticatedClient(generation)
             try check(generation)
-            let prepared = try queue.sync { () throws -> (Data, UInt32, IngestionManifest)? in
+            let prepared = try queue.sync { () throws -> (Data, UInt32, IngestionManifest, Bool)? in
                 guard lifecycle == generation, !deleted else { throw CancellationError() }
                 // Authentication is an await boundary. Include every source change received during it
                 // before creating the immutable submitted prefix, including deletions and settings.
@@ -383,15 +387,36 @@ public final class GlookoService: Service {
                       let settings = context.settings, var owned = history else { throw CancellationError() }
                 guard let file = try owned.exportFile(timeZone: context.timeZone, settings: settings) else { return nil }
                 let manifest = IngestionManifest(serial: owned.serial, events: owned.exportedEvents,
-                                                 timeZone: context.timeZone, committedThrough: owned.committedThrough)
+                                                 timeZone: context.timeZone, committedThrough: owned.committedThrough,
+                                                 repairedBasalIndices: owned.repairedBasalIndices)
+                let needsRecovery = manifest.repairedBasalIndices.contains { $0 > (owned.lastUploadedIndex ?? 0) }
                 owned.markSubmitted(through: file.lastIndex)
                 try repository.save(owned)
                 history = owned; currentStatus.lastAttemptAt = Date()
                 uploadWakeRequested = false; forcedUploadRequested = false
-                return (file.data, file.lastIndex, manifest)
+                return (file.data, file.lastIndex, manifest, needsRecovery)
             }
             guard let prepared else { return }
             try check(generation)
+            os_log("Submitting history: %d bytes, %d final records, %d deferred intervals", log: log, type: .default,
+                   prepared.0.count, prepared.2.records.count, prepared.2.deferredRecords)
+            if prepared.3 {
+                let journal: (IngestionCorrection) throws -> Void = { correction in
+                    try self.queue.sync {
+                        guard self.lifecycle == generation, !self.deleted, var owned = self.history else { throw CancellationError() }
+                        owned.recordCorrectionIntent(correction)
+                        try self.repository.save(owned)
+                        self.history = owned
+                    }
+                }
+                do { try await transport.repairZeroDurationBasals(prepared.2, recordIntent: journal) }
+                catch GlookoError.authenticationRequired {
+                    transport = try await authenticatedClient(generation, renew: true)
+                    try check(generation)
+                    try await transport.repairZeroDurationBasals(prepared.2, recordIntent: journal)
+                }
+                try check(generation)
+            }
             var result = try await transport.uploadDeviceFile(prepared.0, extractorName: "InsuletOmnipod")
             if Self.sessionExpiredStatuses.contains(result.status) {
                 transport = try await authenticatedClient(generation, renew: true)
@@ -406,14 +431,27 @@ public final class GlookoService: Service {
                 if lifecycle == generation { currentStatus.lastUploadAt = Date(); currentStatus.verificationDetail = "Submitted; checking Glooko records" }
             }
             changed()
-            let verification = try await transport.verifyIngestion(prepared.2)
+            var verification = try await transport.verifyIngestion(prepared.2)
+            // Give asynchronous ingestion a bounded chance to finish without posting the file again.
+            // Wrong values and duplicates require review/recovery, so they are not polled as worker lag.
+            for delay in [1, 2, 4] {
+                guard !verification.confirmed, verification.missingRecords > 0,
+                      verification.mismatchedRecords == 0, verification.duplicateRecords == 0 else { break }
+                try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
+                try check(generation)
+                verification = try await transport.verifyIngestion(prepared.2)
+            }
             try check(generation)
+            os_log("Readback: %d matched, %d missing, %d mismatched, %d duplicate, %d deferred", log: log, type: .default,
+                   verification.matchedRecords, verification.missingRecords, verification.mismatchedRecords,
+                   verification.duplicateRecords, verification.deferredRecords)
             try queue.sync {
                 guard lifecycle == generation, !deleted, var owned = history else { throw CancellationError() }
                 currentStatus.verificationDetail = verification.detail
-                currentStatus.lastError = owned.blockedReason(now: Date())
+                currentStatus.lastError = owned.blockedReason(now: Date()) ??
+                    ((verification.mismatchedRecords > 0 || verification.duplicateRecords > 0) ? verification.detail : nil)
                 if verification.confirmed {
-                    owned.lastUploadedIndex = prepared.1
+                    owned.markVerified(fileIndex: prepared.1, through: prepared.2.verifiedThroughIndex, at: Date())
                     try repository.save(owned)
                     history = owned; currentStatus.lastConfirmedAt = Date(); currentStatus.uploadedThrough = verification.confirmedThrough
                 }
