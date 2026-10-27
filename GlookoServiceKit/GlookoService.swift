@@ -30,6 +30,9 @@ public final class GlookoService: Service {
         public var lastReportCheckedAt: Date?
         public var reportWarnings: [String] = []
         public var reportError: String?
+        public var pumpSourceLabel: String?
+        public var pumpSourceLabelVerifiedAt: Date?
+        public var pumpSourceLabelError: String?
     }
     public struct Summary {
         public var serial: UInt32
@@ -41,6 +44,7 @@ public final class GlookoService: Service {
         public var conflictCount: Int
         public var hasUnuploadedRecords: Bool
         public var sourceName: String?
+        public var pumpUploadName: String?
         public var canStartNewPeriod: Bool
         public var pendingCarbs: Int
         public var correctedBasalIntervals: Int
@@ -139,6 +143,9 @@ public final class GlookoService: Service {
         currentStatus.glucoseBackfillDetail = rawState["glucoseBackfillDetail"] as? String
         currentStatus.lastReportCheckedAt = rawState["lastReportCheckedAt"] as? Date
         currentStatus.reportWarnings = rawState["reportWarnings"] as? [String] ?? []
+        currentStatus.pumpSourceLabel = rawState["pumpSourceLabel"] as? String
+        currentStatus.pumpSourceLabelVerifiedAt = rawState["pumpSourceLabelVerifiedAt"] as? Date
+        currentStatus.pumpSourceLabelError = rawState["pumpSourceLabelError"] as? String
         if rawState["verificationVersion"] as? Int == 1 {
             currentStatus.lastConfirmedAt = rawState["lastConfirmedAt"] as? Date
             currentStatus.uploadedThrough = rawState["uploadedThrough"] as? Date
@@ -189,6 +196,7 @@ public final class GlookoService: Service {
                                       conflictCount: history?.conflicts.count ?? 0,
                                       hasUnuploadedRecords: history?.hasUnuploadedRecords ?? false,
                                       sourceName: contexts.last?.sourceName,
+                                      pumpUploadName: contexts.last.flatMap { $0.isRealPump ? PumpAttribution(serial: history?.serial ?? 0, sourceName: $0.sourceName).displayName : nil },
                                       canStartNewPeriod: accountID != nil && contexts.last?.isRealPump == true && contexts.last?.settings != nil &&
                                         (storageError != nil || history?.blockedReason(now: Date()) != nil ||
                                          (history?.sourceID != nil && history?.sourceID != contexts.last?.sourceID)),
@@ -219,6 +227,9 @@ public final class GlookoService: Service {
             value["glucoseBackfillDetail"] = currentStatus.glucoseBackfillDetail
             value["lastReportCheckedAt"] = currentStatus.lastReportCheckedAt
             value["reportWarnings"] = currentStatus.reportWarnings
+            value["pumpSourceLabel"] = currentStatus.pumpSourceLabel
+            value["pumpSourceLabelVerifiedAt"] = currentStatus.pumpSourceLabelVerifiedAt
+            value["pumpSourceLabelError"] = currentStatus.pumpSourceLabelError
             value["reportingContexts"] = try? JSONEncoder().encode(contexts)
             return value
         }
@@ -431,8 +442,13 @@ public final class GlookoService: Service {
             try queue.sync {
                 try reconcileHistory()
             }
-            guard queue.sync(execute: { history?.hasUnuploadedRecords == true }) else { return }
+            let needsSubmission = queue.sync { history?.hasUnuploadedRecords == true }
+            guard needsSubmission || force || queue.sync(execute: { currentStatus.pumpSourceLabelVerifiedAt == nil }) else { return }
             var transport = try await authenticatedClient(generation)
+            if !needsSubmission {
+                try await updatePumpSourceLabel(transport, generation: generation)
+                return
+            }
             try check(generation)
             let prepared = try queue.sync { () throws -> (Data, UInt32, IngestionManifest, Bool)? in
                 guard lifecycle == generation, !deleted else { throw CancellationError() }
@@ -453,7 +469,10 @@ public final class GlookoService: Service {
                 uploadWakeRequested = false; forcedUploadRequested = false
                 return (file.data, file.lastIndex, manifest, needsRecovery)
             }
-            guard let prepared else { return }
+            guard let prepared else {
+                try await updatePumpSourceLabel(transport, generation: generation)
+                return
+            }
             try check(generation)
             os_log("Submitting history: %d bytes, %d final records, %d deferred intervals", log: log, type: .default,
                    prepared.0.count, prepared.2.records.count, prepared.2.deferredRecords)
@@ -513,6 +532,7 @@ public final class GlookoService: Service {
                     history = owned; currentStatus.lastConfirmedAt = Date(); currentStatus.uploadedThrough = verification.confirmedThrough
                 }
             }
+            if verification.confirmed { try await updatePumpSourceLabel(transport, generation: generation) }
             if verification.confirmed, let owned = queue.sync(execute: { history }),
                let timeZone = queue.sync(execute: { contexts.last?.timeZone }) {
                 do {
@@ -528,6 +548,33 @@ public final class GlookoService: Service {
         } catch is CancellationError { }
         catch {
             queue.sync { if lifecycle == generation && !deleted { currentStatus.lastError = String(describing: error) } }
+        }
+    }
+
+    /// Metadata verification is independent of clinical confirmation: its failure never retracts a verified upload.
+    private func updatePumpSourceLabel(_ transport: GlookoClient, generation: UUID) async throws {
+        do {
+            try check(generation)
+            let attribution = try queue.sync { () throws -> PumpAttribution in
+                guard let owned = history, let context = contexts.last, context.isRealPump,
+                      let sourceID = context.sourceID, sourceID == owned.sourceID else { throw CancellationError() }
+                return PumpAttribution(serial: owned.serial, sourceName: context.sourceName)
+            }
+            _ = try await transport.identifyLoopPump(attribution)
+            try check(generation)
+            queue.sync {
+                guard lifecycle == generation, !deleted, history?.serial == attribution.serial,
+                      let sourceID = history?.sourceID, contexts.last?.sourceID == sourceID,
+                      contexts.last?.sourceName == attribution.sourceName else { return }
+                currentStatus.pumpSourceLabel = attribution.displayName
+                currentStatus.pumpSourceLabelVerifiedAt = Date(); currentStatus.pumpSourceLabelError = nil
+            }
+        } catch is CancellationError { throw CancellationError() }
+        catch {
+            queue.sync {
+                guard lifecycle == generation, !deleted else { return }
+                currentStatus.pumpSourceLabelError = "Could not verify the Loop source label: \(error)"
+            }
         }
     }
 
