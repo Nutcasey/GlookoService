@@ -71,6 +71,9 @@ public final class GlookoService: Service {
     private var contexts: [ReportingContext] = []
     private var doseQueryDrained = false
     private var settingsQueryDrained = false
+    /// Process-local like the drain flags: Loop restarts both streams on each launch, and every changed
+    /// dose batch is followed by an empty drain callback. Only a continuous wait is a paused stream.
+    private var sourceStreamsWaitingSince: Date? = Date()
     private var deleted = false
     private var lifecycle = UUID()
     private var signInRequest: UUID?
@@ -1006,7 +1009,7 @@ public final class GlookoService: Service {
                     else if contexts.last?.settings == nil { reason = reason ?? contexts.last?.problem ?? "Complete pump settings are unavailable. Insulin uploads are paused." }
                 }
                 if let source = history?.sourceID, let latest = contexts.last?.sourceID, source != latest { reason = "The connected pump source changed. Insulin uploads are paused." }
-                if Date().timeIntervalSince(connectedAt) > alertThreshold && (!doseQueryDrained || !settingsQueryDrained) { reason = "Loop has not finished reading the dose and settings streams. Insulin uploads are paused." }
+                if let waiting = sourceStreamsWaitingSince, Date().timeIntervalSince(waiting) > alertThreshold { reason = "Loop has not finished reading the dose and settings streams. Insulin uploads are paused." }
             }
             let delivery = syncHealth.notifications(pending: pending, pausedReason: reason, threshold: alertThreshold, canDeliver: serviceDelegate != nil)
             scheduleHealthCheck()
@@ -1021,6 +1024,11 @@ public final class GlookoService: Service {
             issuer.issueAlert(Alert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: notice.id),
                 foregroundContent: content, backgroundContent: content, trigger: .immediate))
         }
+    }
+    /// Called on the state queue after a source stream callback.
+    private func noteSourceDrain() {
+        if doseQueryDrained && settingsQueryDrained { sourceStreamsWaitingSince = nil }
+        else if sourceStreamsWaitingSince == nil { sourceStreamsWaitingSince = Date() }
     }
     /// One owned wake-up at a time. BLE/foreground source activity also evaluates health; iOS may suspend
     /// this task while the host is not executing, so it does not replace Loop's own not-running alerts.
@@ -1168,6 +1176,7 @@ extension GlookoService: RemoteDataService {
                 try repository.save(owned)
                 history = owned
                 doseQueryDrained = created.isEmpty && deleted.isEmpty
+                noteSourceDrain()
                 diagnosticState.lastDoseCallback = Date()
                 recordDiagnostic("source", "Dose callback: \(created.count) created, \(deleted.count) deleted; drained \(doseQueryDrained)")
             }
@@ -1196,6 +1205,7 @@ extension GlookoService: RemoteDataService {
                 owned.reportingContextData = try JSONEncoder().encode(updated)
                 try repository.save(owned)
                 history = owned; contexts = updated; settingsQueryDrained = stored.isEmpty
+                noteSourceDrain()
                 diagnosticState.lastSettingsCallback = Date()
                 recordDiagnostic("source", "Settings callback: \(stored.count) snapshots; drained \(settingsQueryDrained)")
             }
