@@ -54,6 +54,15 @@ public struct HistoryRepository {
         try FileManager.default.removeItem(at: directory)
     }
 
+    /// Retired glucose uploader cache only; never remove Loop's primary glucose store.
+    public func removeRetiredGlucoseData(accountID: String) throws {
+        let folder = directory.appendingPathComponent(GlookoAccount(id: accountID, email: "").storageKey)
+        for name in ["glucose.json", "glucose-initialised"] {
+            let file = folder.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        }
+    }
+
     private var legacyURL: URL { directory.appendingPathComponent("pump-history.json") }
     private func url(accountID: String) -> URL {
         directory.appendingPathComponent(GlookoAccount(id: accountID, email: "").storageKey, isDirectory: true)

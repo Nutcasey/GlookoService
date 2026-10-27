@@ -5,17 +5,17 @@ final class SyncHealthTests: XCTestCase {
     func testOverdueSubmissionAndConfirmationAreDistinctDeduplicatedAndRetractedOnRecovery() throws {
         let start = Date(timeIntervalSince1970: 1_800_000_000)
         var health = GlookoSyncHealth()
-        XCTAssertTrue(health.notifications(pending: [.glucose], pausedReason: nil, threshold: 3600, canDeliver: true, now: start).issue.isEmpty)
-        let stalled = health.notifications(pending: [.glucose], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(3600))
-        XCTAssertEqual(stalled.issue.map(\.id), ["submission-overdue-glucose"])
+        XCTAssertTrue(health.notifications(pending: [.insulin], pausedReason: nil, threshold: 3600, canDeliver: true, now: start).issue.isEmpty)
+        let stalled = health.notifications(pending: [.insulin], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(3600))
+        XCTAssertEqual(stalled.issue.map(\.id), ["submission-overdue-insulin"])
         health = try JSONDecoder().decode(GlookoSyncHealth.self, from: JSONEncoder().encode(health))
-        XCTAssertTrue(health.notifications(pending: [.glucose], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(3700)).issue.isEmpty)
-        health.submitted(.glucose, at: start.addingTimeInterval(3800))
-        let accepted = health.notifications(pending: [.glucose], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(3800))
-        XCTAssertEqual(accepted.retract, ["submission-overdue-glucose"])
-        let unconfirmed = health.notifications(pending: [.glucose], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(7400))
-        XCTAssertEqual(unconfirmed.issue.map(\.id), ["confirmation-overdue-glucose"])
-        XCTAssertEqual(health.notifications(pending: [], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(7500)).retract, ["confirmation-overdue-glucose"])
+        XCTAssertTrue(health.notifications(pending: [.insulin], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(3700)).issue.isEmpty)
+        health.submitted(.insulin, at: start.addingTimeInterval(3800))
+        let accepted = health.notifications(pending: [.insulin], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(3800))
+        XCTAssertEqual(accepted.retract, ["submission-overdue-insulin"])
+        let unconfirmed = health.notifications(pending: [.insulin], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(7400))
+        XCTAssertEqual(unconfirmed.issue.map(\.id), ["confirmation-overdue-insulin"])
+        XCTAssertEqual(health.notifications(pending: [], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(7500)).retract, ["confirmation-overdue-insulin"])
     }
     func testAuthAndReviewAlertsAreImmediateAndWaitForAnIssuerWithoutBeingLost() {
         var health = GlookoSyncHealth(); let now = Date()
@@ -37,6 +37,28 @@ final class SyncHealthTests: XCTestCase {
         health.submitted(.carbs, at: now.addingTimeInterval(3500))
         XCTAssertEqual(health.notifications(pending: [.carbs], pausedReason: nil, threshold: 3600, canDeliver: true, now: now.addingTimeInterval(3600)).issue.map(\.id), ["confirmation-overdue-carbs"])
     }
+    func testRetiredGlucoseCacheCleanupPreservesPumpCarbAndOtherAccountHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = HistoryRepository(directory: root)
+        for owner in ["one", "two"] {
+            let folder = root.appendingPathComponent(GlookoAccount(id: owner, email: "").storageKey)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            for name in ["pump-history.json", "carbs.json", "glucose.json", "glucose-initialised"] {
+                try Data(name.utf8).write(to: folder.appendingPathComponent(name))
+            }
+        }
+        try repository.removeRetiredGlucoseData(accountID: "one")
+        try repository.removeRetiredGlucoseData(accountID: "one")
+        let own = root.appendingPathComponent(GlookoAccount(id: "one", email: "").storageKey)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: own.appendingPathComponent("glucose.json").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: own.appendingPathComponent("glucose-initialised").path))
+        XCTAssertEqual(try String(contentsOf: own.appendingPathComponent("pump-history.json")), "pump-history.json")
+        XCTAssertEqual(try String(contentsOf: own.appendingPathComponent("carbs.json")), "carbs.json")
+        let other = root.appendingPathComponent(GlookoAccount(id: "two", email: "").storageKey)
+        XCTAssertEqual(try String(contentsOf: other.appendingPathComponent("glucose.json")), "glucose.json")
+    }
+
     func testExplicitPurgeRemovesAllPluginHistoryAndBackupsWithoutTouchingSiblingData() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

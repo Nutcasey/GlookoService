@@ -47,7 +47,7 @@ final class ServiceUploadTests: XCTestCase {
 
     private func signedIn() async throws -> GlookoService {
         let service = GlookoService(); services.append(service)
-        _ = try await service.signIn(email: "offline@example.test", password: "invented", historyStart: Date(timeIntervalSince1970: 0), rememberPassword: true, insulinEnabled: true, glucoseEnabled: true, allowCellular: true)
+        _ = try await service.signIn(email: "offline@example.test", password: "invented", historyStart: Date(timeIntervalSince1970: 0), rememberPassword: true, insulinEnabled: true, allowCellular: true)
         return service
     }
 
@@ -90,6 +90,23 @@ final class ServiceUploadTests: XCTestCase {
         return complete
     }
 
+    func testLegacyGlucoseSettingCannotSubscribeStoreOrUploadReadings() async throws {
+        let original = try await signedIn()
+        var legacy = original.rawState; legacy["glucoseEnabled"] = true
+        let restored = try XCTUnwrap(GlookoService(rawState: legacy)); services.append(restored)
+        let device = HKDevice(name: "Offline sensor", manufacturer: "Dexcom", model: "G7", hardwareVersion: nil,
+            firmwareVersion: nil, softwareVersion: nil, localIdentifier: nil, udiDeviceIdentifier: nil)
+        let sample = StoredGlucoseSample(syncIdentifier: "retired-upload", startDate: start,
+            quantity: HKQuantity(unit: HKUnit(from: "mg/dL"), doubleValue: 100), device: device)
+        var result: Result<Bool, Error>?
+        restored.uploadGlucoseData([sample]) { result = $0 }
+        XCTAssertEqual(restored.glucoseDataLimit, 0, "Loop must not query glucose for this service")
+        XCTAssertFalse(try XCTUnwrap(result).get(), "The service must not claim to upload glucose")
+        await restored.uploadIfNeeded(force: true)
+        XCTAssertNil(OfflineGlooko.uploadedFile)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: accountFolder.appendingPathComponent("glucose.json").path))
+    }
+
     func testARestoredServiceDoesNotAlertWhileLoopDrainsAChangedDoseBatch() async throws {
         let original = try await signedIn()
         original.uploadSettingsData([completeSettings()]) { _ in }
@@ -117,27 +134,22 @@ final class ServiceUploadTests: XCTestCase {
                        "A changed batch followed by Loop's drain is normal operation: \(issued.map(\.foregroundContent?.body))")
     }
 
-    func testConcurrentStreamsShareOnePasswordRecoveryAndStopAfterCredentialRejection() async throws {
+    func testUploadAndLiveCheckShareOnePasswordRecoveryAndStopAfterCredentialRejection() async throws {
         let service = try await signedIn()
         OfflineGlooko.expireSessionAndRejectPassword()
         OfflineGlooko.hold("POST /api/v3/users/sign_in")
         try stage(carb(20), in: service)
         try await eventually { OfflineGlooko.hasHeldRequest }
-        let device = HKDevice(name: "Offline sensor", manufacturer: "Dexcom", model: "G7", hardwareVersion: nil,
-                              firmwareVersion: nil, softwareVersion: nil, localIdentifier: nil, udiDeviceIdentifier: nil)
-        let sample = StoredGlucoseSample(syncIdentifier: "waiting-reading", startDate: start,
-            quantity: HKQuantity(unit: HKUnit(from: "mg/dL"), doubleValue: 100), device: device)
-        var staged: Result<Bool, Error>?
-        service.uploadGlucoseData([sample]) { staged = $0 }
-        _ = try XCTUnwrap(staged).get()
+        let check = Task { await service.checkGlookoNow() }
+        try await eventually { service.diagnostics.checking }
         OfflineGlooko.release()
+        await check.value
         try await eventually { service.options.authenticationRequired != nil }
         await service.uploadIfNeeded(force: true)
         XCTAssertEqual(OfflineGlooko.signInCount, 2, "One interactive login and one shared recovery; no replay after rejection")
         XCTAssertEqual(service.summary.pendingCarbs, 1)
-        XCTAssertEqual(service.diagnostics.pendingGlucose, 1)
         XCTAssertEqual(OfflineGlooko.foodWriteCount, 0)
-        XCTAssertEqual(OfflineGlooko.glucoseFileWriteCount, 0)
+        XCTAssertNil(OfflineGlooko.uploadedFile)
     }
 
     func testAnEditDuringSubmissionIsDrainedAndReadbackUsesRecentUpdateTime() async throws {
@@ -257,43 +269,7 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertEqual(service.summary.conflictCount, 0)
     }
 
-    func testGlucoseCallbackOwnsHistoryBeforeAcknowledgementAndNeedsBothStoredAndGraphReadback() async throws {
-        let service = try await signedIn()
-        let parser = ISO8601DateFormatter(); parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let timestamp = try XCTUnwrap(parser.date(from: "2026-10-21T11:22:51.125Z"))
-        let device = HKDevice(name: "Offline sensor", manufacturer: "Dexcom", model: "G7", hardwareVersion: nil,
-                              firmwareVersion: nil, softwareVersion: nil, localIdentifier: nil, udiDeviceIdentifier: nil)
-        let sample = StoredGlucoseSample(syncIdentifier: "sensor-reading", startDate: timestamp,
-                                         quantity: HKQuantity(unit: HKUnit(from: "mg/dL"), doubleValue: 100), device: device)
-        // Older readings imported from the official G7 app have provenance but no HKDevice.
-        let appSample = StoredGlucoseSample(provenanceIdentifier: "com.dexcom.g7app", syncIdentifier: "app-reading",
-            startDate: timestamp.addingTimeInterval(300), quantity: HKQuantity(unit: HKUnit(from: "mg/dL"), doubleValue: 110))
-        OfflineGlooko.hold("GET /api/v3/session/users")
-        var outcome: Result<Bool, Error>?
-        service.uploadGlucoseData([sample, appSample]) { outcome = $0 }
-        _ = try XCTUnwrap(outcome).get()
-        let file = accountFolder.appendingPathComponent("glucose.json")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path), "Success must mean the source reading is durably owned, even before a network request")
-        try await eventually { OfflineGlooko.hasHeldRequest }
-        XCTAssertNil(service.rawState["lastGlucoseConfirmedAt"])
-        OfflineGlooko.release()
-        try await eventually { OfflineGlooko.uploadedFile != nil }
-        let csv = String(decoding: try XCTUnwrap(OfflineGlooko.uploadedFile), as: UTF8.self)
-        let clock = DateFormatter(); clock.locale = Locale(identifier: "en_US_POSIX")
-        clock.timeZone = .current; clock.dateFormat = "dd-MM-yyyy HH:mm"
-        XCTAssertTrue(csv.contains("\(clock.string(from: timestamp)),0,100.00,"), csv)
-        XCTAssertTrue(csv.contains("\(clock.string(from: timestamp.addingTimeInterval(300))),0,110.00,"), csv)
-        try await eventually { OfflineGlooko.glucoseReadCount > 0 }
-        XCTAssertNil(service.rawState["lastGlucoseConfirmedAt"], "An accepted file and a stored record cannot confirm a missing graph value")
-        OfflineGlooko.makeGlucoseGraphVisible()
-        try await eventually { service.rawState["lastGlucoseConfirmedAt"] != nil }
-        XCTAssertEqual(service.rawState["glucoseThrough"] as? Date, parser.date(from: "2026-10-21T11:27:00.000Z"))
-        let restored = try XCTUnwrap(GlookoService(rawState: service.rawState)); services.append(restored)
-        restored.uploadGlucoseData([sample, appSample]) { outcome = $0 }
-        _ = try XCTUnwrap(outcome).get()
-        await restored.uploadIfNeeded(force: true)
-        XCTAssertEqual(OfflineGlooko.glucoseFileWriteCount, 1, "A confirmed reading survives restoration without another CSV upload")
-    }
+
 }
 
 private extension URLSessionConfiguration {
@@ -317,13 +293,10 @@ private final class OfflineGlooko: URLProtocol {
     private static var since: Date?
     private static var uploaded: Data?
     private static var cancellations = 0
-    private static var glucoseReads = 0
-    private static var glucoseWrites = 0
-    private static var glucoseGraphVisible = false
     private var stopped = false
     private static func access<T>(_ action: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return action() }
 
-    static func reset(accountID: String) { access { account = accountID; rejectCredentials = false; signIns = 0; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; uploaded = nil; cancellations = 0; glucoseReads = 0; glucoseWrites = 0; glucoseGraphVisible = false } }
+    static func reset(accountID: String) { access { account = accountID; rejectCredentials = false; signIns = 0; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; uploaded = nil; cancellations = 0 } }
     static var signInCount: Int { access { signIns } }
     static func expireSessionAndRejectPassword() { access { rejectCredentials = true } }
     static func hold(_ key: String) { access { heldKey = key } }
@@ -333,9 +306,6 @@ private final class OfflineGlooko: URLProtocol {
     static var foodReadSince: Date? { access { since } }
     static var uploadedFile: Data? { access { uploaded } }
     static var cancelledRequests: Int { access { cancellations } }
-    static var glucoseReadCount: Int { access { glucoseReads } }
-    static var glucoseFileWriteCount: Int { access { glucoseWrites } }
-    static func makeGlucoseGraphVisible() { access { glucoseGraphVisible = true } }
     static func failNextFoodWrite() { access { failWrite = true } }
     static func release() { let request = access { () -> OfflineGlooko? in let old = held; held = nil; heldKey = nil; return old }; request?.reply() }
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -354,11 +324,6 @@ private final class OfflineGlooko: URLProtocol {
         while stream.hasBytesAvailable { let count = stream.read(&buffer, maxLength: buffer.count); if count <= 0 { break }; result.append(buffer, count: count) }
         return result
     }
-    private static func localTimestamp(_ utc: String) -> String {
-        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current; formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:00.000'Z'"
-        return formatter.string(from: ISO8601DateFormatter().date(from: utc)!)
-    }
     private func reply() {
         guard !Self.access({ stopped }) else { return }
         let url = request.url!, path = url.path, data = body()
@@ -370,14 +335,6 @@ private final class OfflineGlooko: URLProtocol {
             if path.contains("sign_in") { Self.signIns += 1; if Self.rejectCredentials { status = 401 } else { headers["Set-Cookie"] = "_logbook-web_session=invented; Path=/; Secure" } }
             else if path == "/api/v2/users", Self.rejectCredentials { status = 401 }
             else if path == "/api/v2/users" { payload = ["users": [["guid": Self.account, "email": "offline@example.test", "softDeleted": false]]] }
-            else if path == "/api/v3/session/users" { payload = ["currentUser": ["glookoCode": "offline"]] }
-            else if path == "/api/v3/graph/data" {
-                let points: [[String: Any]] = Self.glucoseGraphVisible ? [["timestamp": Self.localTimestamp("2026-10-21T11:22:00Z"), "value": 10000], ["timestamp": Self.localTimestamp("2026-10-21T11:27:00Z"), "value": 11000]] : []
-                payload = ["series": ["cgmHigh": [], "cgmNormal": points, "cgmLow": []]]
-            } else if path == "/api/v2/cgm/egvs" {
-                Self.glucoseReads += 1
-                payload = ["egvs": [["guid": "offline-cgm-reading", "cgmDeviceGuid": "offline-cgm", "displayTime": Self.localTimestamp("2026-10-21T11:22:00Z"), "glucoseValue": 10000, "softDeleted": false], ["guid": "offline-app-reading", "cgmDeviceGuid": "offline-cgm", "displayTime": Self.localTimestamp("2026-10-21T11:27:00Z"), "glucoseValue": 11000, "softDeleted": false]]]
-            }
             else if path == "/api/v2/foods", request.httpMethod == "PUT" {
                 Self.writes += 1
                 if Self.failWrite { Self.failWrite = false; status = 500 }
@@ -394,7 +351,6 @@ private final class OfflineGlooko: URLProtocol {
             } else if path == "/api/v2/meals" { status = 204 }
             else if path == "/api/v3/device/file/upload" {
                 Self.uploaded = data
-                if request.url?.query?.contains("LibreviewCSV") == true { Self.glucoseWrites += 1 }
             }
             else if path == "/api/v2/pumps" { payload = ["pumps": []] }
             else if path != "/api/v3/users/activities_and_event_data_sync/complete" { status = 500 }

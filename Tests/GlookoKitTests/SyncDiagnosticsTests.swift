@@ -24,22 +24,4 @@ final class SyncDiagnosticsTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: file), damaged)
     }
 
-    func testReadbackRequiresExactStoredAndGraphedValuesAndDoesNotTurnMissingDataGreen() throws {
-        let start = ISO8601DateFormatter().date(from: "2026-10-27T12:00:00Z")!
-        let readings = [SourceGlucose(id: "one", date: start, mgdl: 100, utcOffset: 0),
-                        SourceGlucose(id: "two", date: start.addingTimeInterval(300), mgdl: 110, utcOffset: 0)]
-        let rows: [[String: Any]] = [["softDeleted": false, "displayTime": "2026-10-27T12:00:00.000Z", "glucoseValue": 10000],
-                                     ["softDeleted": false, "displayTime": "2026-10-27T12:05:00.000Z", "glucoseValue": 11000]]
-        let graph = ["2026-10-27T12:00": [10000], "2026-10-27T12:05": [11000]]
-        XCTAssertTrue(try glucoseEvidence(readings, stored: rows, graph: graph, day: "2026-10-27").verified)
-        var wrong = graph; wrong["2026-10-27T12:05"] = [12000]
-        let mismatch = try glucoseEvidence(readings, stored: rows, graph: wrong, day: "2026-10-27")
-        XCTAssertEqual(mismatch.matchedStored, 2); XCTAssertEqual(mismatch.matchedGraphed, 1); XCTAssertFalse(mismatch.verified)
-        XCTAssertFalse(try glucoseEvidence(readings, stored: [], graph: graph, day: "2026-10-27").verified)
-        var duplicate = rows; duplicate.append(rows[0])
-        let duplicated = try glucoseEvidence(readings, stored: duplicate, graph: graph, day: "2026-10-27")
-        XCTAssertEqual(duplicated.duplicates, 1); XCTAssertFalse(duplicated.verified)
-        XCTAssertFalse(try glucoseEvidence([], stored: [], graph: [:], day: "2026-10-27").verified)
-        XCTAssertThrowsError(try glucoseEvidence(readings, stored: [["softDeleted": false]], graph: graph, day: "2026-10-27"))
-    }
 }
