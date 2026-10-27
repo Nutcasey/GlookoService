@@ -191,6 +191,7 @@ struct SignInView: View {
 struct StatusView: View {
     @ObservedObject var model: StatusModel
     @State private var confirmDelete = false
+    @State private var showDiagnostics = false
     @State private var confirmNewPeriod = false
     private static let build: String = {
         let bundle = Bundle(for: GlookoServiceCoordinator.self)
@@ -234,6 +235,9 @@ struct StatusView: View {
             Section(header: Text("Account")) {
                 row("Signed in as", model.snapshot.email ?? "—")
                 row("Build", Self.build).accessibilityIdentifier("glooko-build")
+                Button { showDiagnostics = true } label: {
+                    Label("Diagnostics and live check", systemImage: "list.bullet.rectangle")
+                }.accessibilityIdentifier("glooko-diagnostics")
             }
             Section(header: Text("Uploads"), footer: Text("Final history settles for one hour. Loop must finish reading its history before sending. Submission and confirmed Glooko records are tracked separately.")) {
                 row("Last submission", text(model.snapshot.status.lastUploadAt))
@@ -290,6 +294,7 @@ struct StatusView: View {
             }
         }
         .onAppear { model.refresh() }
+        .sheet(isPresented: $showDiagnostics) { DiagnosticsView(service: model.service, build: Self.build) }
         .toolbar { Button("Done") { model.done() } }
         .alert("Delete the Glooko service?", isPresented: $confirmDelete) {
             Button("Delete", role: .destructive) { model.delete() }

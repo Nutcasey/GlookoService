@@ -83,3 +83,13 @@ Remaining format/product limits:
 - Bolus amounts use the format's hundredth-unit precision; therapy profiles use the native profile precision.
 - Two-factor sign-in and regions outside the EU are unsupported.
 - Submitted clinical corrections remain reviewable conflicts until a supported amendment contract is established or the user explicitly archives the period.
+
+## Diagnostics on the phone
+
+Open **Settings → Glooko → Diagnostics and live check**. **Check Glooko now** performs fresh authenticated reads of stored pump history, today's CGM records and the CGM graph. It compares exact values against a captured copy of Loop's local history and reports missing, different and duplicate points. An empty source is not a successful glucose check. The check does not send clinical data or advance upload acknowledgements. Results are dated, retained across restarts, and remain separate from Glooko's overall Summary warnings.
+
+The screen also shows the latest accepted source reading, source-callback times, query-drain state, pending queues, final pump-history cutoff and confirmation dates. It flags a source reading more than ten minutes old so a stale sensor stream is distinguishable from an upload failure. Pump history retains its one-hour settling delay and fifteen-minute submission interval.
+
+The service retains up to 250 activity events for at most 48 hours in protected, account-scoped storage. HTTP traces include method, path without query parameters, status, duration and byte counts. Headers, cookies, passwords and bodies are excluded. Journal failures are visible and do not block clinical uploads; an unreadable journal is preserved rather than overwritten. Use the share button to review/export the diagnostic report. It contains health-data timings, counts and errors.
+
+In the Glooko mobile app, today's CGM points are graphed in **Daily log**; individual CGM readings are not listed as history rows. Glooko [documents this distinction](https://support.glooko.com/hc/en-gb/articles/115003857429-Why-are-continuous-glucose-monitor-CGM-readings-missing-from-the-History-view). Backend/graph verification cannot prove the current contents of every mobile-app screen. The Daily log graph, today's boluses and a food entry were separately inspected on the USB iPhone during this change.
