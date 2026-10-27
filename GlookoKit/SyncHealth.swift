@@ -1,7 +1,7 @@
 import Foundation
 
 public struct GlookoSyncHealth: Codable, Sendable {
-    public enum Stream: String, Codable, CaseIterable, Sendable { case insulin, glucose, carbs }
+    public enum Stream: String, Codable, CaseIterable, Sendable { case insulin, carbs }
     public struct Progress: Codable, Sendable {
         public var pendingSince: Date?
         public var submittedAt: Date?

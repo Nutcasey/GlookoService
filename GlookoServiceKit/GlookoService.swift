@@ -21,12 +21,7 @@ public final class GlookoService: Service {
         public var lastCarbConfirmedAt: Date?
         public var carbDetail: String?
         public var carbError: String?
-        public var lastGlucoseConfirmedAt: Date?
-        public var glucoseThrough: Date?
-        public var glucoseDetail: String?
-        public var glucoseError: String?
-        public var glucoseBackfillDetail: String?
-        public var glucoseBackfillError: String?
+        public var sourceReplayDetail: String?
         public var lastReportCheckedAt: Date?
         public var reportWarnings: [String] = []
         public var reportError: String?
@@ -48,7 +43,6 @@ public final class GlookoService: Service {
         public var canStartNewPeriod: Bool
         public var pendingCarbs: Int
         public var correctedBasalIntervals: Int
-        public var pendingGlucose: Int
     }
     public struct Snapshot {
         public var email: String?
@@ -93,21 +87,11 @@ public final class GlookoService: Service {
     private var carbWakeRequested = false
     private var carbRetryDelay: TimeInterval = 30
     private var carbIdentityVersion = 1
-    private var glucose: GlucoseOutbox?
-    private var glucoseStorageError: String?
-    private var glucoseStorageCreated = false
-    private var glucoseTask: Task<Void, Never>?
-    private var glucoseTaskID: UUID?
-    private var glucoseRetryTask: Task<Void, Never>?
-    private var glucoseRetryID: UUID?
-    private var glucoseRetryDelay: TimeInterval = 30
-    private var glucoseWakeRequested = false
-    private var glucoseRepository: GlucoseOutboxRepository { .init(directory: repository.directory) }
+    private var retiredDataCleanupError: String?
     private let credentials = GlookoCredentials()
     private var rememberPassword = false
     private var credentialProtectionMigrated = false
     private var insulinEnabled = false
-    private var glucoseEnabled = false
     private var allowCellular = false
     private var sourceReplayRequired = false
     private var alertThreshold: TimeInterval = 3600
@@ -147,12 +131,12 @@ public final class GlookoService: Service {
         rememberPassword = rawState["rememberPassword"] as? Bool ?? onboarded
         credentialProtectionMigrated = rawState["credentialProtectionMigrated"] as? Bool ?? false
         insulinEnabled = rawState["insulinEnabled"] as? Bool ?? onboarded
-        glucoseEnabled = rawState["glucoseEnabled"] as? Bool ?? onboarded
         allowCellular = rawState["allowCellular"] as? Bool ?? onboarded
         alertThreshold = max(900, rawState["alertThreshold"] as? TimeInterval ?? 3600)
         connectedAt = rawState["connectedAt"] as? Date ?? Date()
         lastAutomaticAuthentication = rawState["lastAutomaticAuthentication"] as? Date
         if let data = rawState["syncHealth"] as? Data, let stored = try? JSONDecoder().decode(GlookoSyncHealth.self, from: data) { syncHealth = stored }
+        syncHealth.streams["glucose"] = nil
         currentStatus.lastUploadAt = rawState["lastUploadAt"] as? Date
         currentStatus.lastAttemptAt = rawState["lastAttemptAt"] as? Date
         currentStatus.lastError = rawState["lastError"] as? String
@@ -161,10 +145,6 @@ public final class GlookoService: Service {
         carbIdentityVersion = rawState["carbIdentityVersion"] as? Int ?? 0
         // Older builds lack the marker, but a confirmation proves that an outbox already existed.
         carbStorageCreated = (rawState["carbStorageCreated"] as? Bool ?? false) || currentStatus.lastCarbConfirmedAt != nil
-        glucoseStorageCreated = rawState["glucoseStorageCreated"] as? Bool ?? false
-        currentStatus.lastGlucoseConfirmedAt = rawState["lastGlucoseConfirmedAt"] as? Date
-        currentStatus.glucoseThrough = rawState["glucoseThrough"] as? Date
-        currentStatus.glucoseBackfillDetail = "History supplied by Loop. No direct HealthKit read is performed."
         currentStatus.lastReportCheckedAt = rawState["lastReportCheckedAt"] as? Date
         currentStatus.reportWarnings = rawState["reportWarnings"] as? [String] ?? []
         currentStatus.pumpSourceLabel = rawState["pumpSourceLabel"] as? String
@@ -187,10 +167,10 @@ public final class GlookoService: Service {
             catch { storageError = "Could not restore pump history: \(error)"; currentStatus.lastError = storageError }
         }
         if let accountID { restoreCarbs(accountID) }
-        if let accountID { restoreGlucose(accountID); restoreDiagnostics(accountID) }
-        sourceReplayRequired = rawState["sourceReplayRequired"] as? Bool ?? (onboarded && (!glucoseStorageCreated || carbIdentityVersion < 1))
+        if let accountID { restoreDiagnostics(accountID); removeRetiredGlucoseData(accountID) }
+        sourceReplayRequired = onboarded && carbIdentityVersion < 1
         if sourceReplayRequired {
-            currentStatus.glucoseBackfillError = "An older service acknowledged source data without retaining it. Remove and re-add this service, keeping local history, so Loop can replay its available history."
+            currentStatus.sourceReplayDetail = "Legacy carb ownership needs source replay. Remove and re-add this service, keeping local history, so Loop can supply its available cache."
         }
         let service = accountID.map { Self.sessionService($0) } ?? Self.legacySessionService
         let cookie = (try? credentials.get(service)) ??
@@ -220,8 +200,7 @@ public final class GlookoService: Service {
                                         (storageError != nil || history?.blockedReason(now: Date()) != nil ||
                                          (history?.sourceID != nil && history?.sourceID != contexts.last?.sourceID)),
                                       pendingCarbs: carbs?.due.count ?? 0,
-                                      correctedBasalIntervals: Set(history?.ingestionCorrections.values.filter { $0.confirmedAt != nil }.map(\.index) ?? []).count,
-                                      pendingGlucose: glucose?.due.count ?? 0))
+                                      correctedBasalIntervals: Set(history?.ingestionCorrections.values.filter { $0.confirmedAt != nil }.map(\.index) ?? []).count))
         }
     }
 
@@ -230,7 +209,7 @@ public final class GlookoService: Service {
             var value: RawStateValue = ["isOnboarded": onboarded, "verificationVersion": 1]
             value["rememberPassword"] = rememberPassword; value["credentialProtectionMigrated"] = credentialProtectionMigrated
             value["insulinEnabled"] = insulinEnabled
-            value["glucoseEnabled"] = glucoseEnabled; value["allowCellular"] = allowCellular
+            value["allowCellular"] = allowCellular
             value["sourceReplayRequired"] = sourceReplayRequired; value["alertThreshold"] = alertThreshold
             value["connectedAt"] = connectedAt; value["lastAutomaticAuthentication"] = lastAutomaticAuthentication
             value["syncHealth"] = try? JSONEncoder().encode(syncHealth)
@@ -243,10 +222,6 @@ public final class GlookoService: Service {
             value["lastCarbConfirmedAt"] = currentStatus.lastCarbConfirmedAt
             value["carbIdentityVersion"] = carbIdentityVersion
             value["carbStorageCreated"] = carbStorageCreated
-            value["glucoseStorageCreated"] = glucoseStorageCreated
-            value["lastGlucoseConfirmedAt"] = currentStatus.lastGlucoseConfirmedAt
-            value["glucoseThrough"] = currentStatus.glucoseThrough
-            value["glucoseBackfillDetail"] = currentStatus.glucoseBackfillDetail
             value["lastReportCheckedAt"] = currentStatus.lastReportCheckedAt
             value["reportWarnings"] = currentStatus.reportWarnings
             value["pumpSourceLabel"] = currentStatus.pumpSourceLabel
@@ -267,7 +242,7 @@ public final class GlookoService: Service {
     }
 
     @discardableResult
-    public func signIn(email: String, password: String, historyStart: Date? = nil, rememberPassword: Bool = false, insulinEnabled: Bool = false, glucoseEnabled: Bool = false, allowCellular: Bool = false) async throws -> String {
+    public func signIn(email: String, password: String, historyStart: Date? = nil, rememberPassword: Bool = false, insulinEnabled: Bool = false, allowCellular: Bool = false) async throws -> String {
         let request = UUID()
         let generation = try queue.sync { () throws -> UUID in
             guard !deleted else { throw CancellationError() }
@@ -294,12 +269,12 @@ public final class GlookoService: Service {
             removeOwnedLegacyCredentials()
             history = owned; account = verified; accountID = verified.id; storedEmail = verified.email
             if carbs == nil { restoreCarbs(verified.id) }
-            if glucose == nil { restoreGlucose(verified.id) }
             restoreDiagnostics(verified.id)
+            removeRetiredGlucoseData(verified.id)
             observeRequests(fresh, generation: generation)
             cancelUploads(); lifecycle = UUID()
             self.rememberPassword = rememberPassword; credentialProtectionMigrated = true; self.insulinEnabled = insulinEnabled
-            self.glucoseEnabled = glucoseEnabled; self.allowCellular = allowCellular
+            self.allowCellular = allowCellular
             syncHealth.authenticationRequired = nil; syncHealth.lastAccountVerified = Date()
             lastAutomaticAuthentication = nil
             observeRequests(fresh, generation: lifecycle)
@@ -359,7 +334,6 @@ public final class GlookoService: Service {
         }
         changed()
         Task { await sendCarbs(force: true) }
-        Task { await sendGlucose(force: true) }
     }
 
     /// Called on the state queue. Every request-owning task belongs to this lifecycle.
@@ -372,9 +346,6 @@ public final class GlookoService: Service {
         carbTask?.cancel(); carbTask = nil; carbTaskID = nil
         carbRetryTask?.cancel(); carbRetryTask = nil; carbRetryID = nil
         carbWakeRequested = false
-        glucoseTask?.cancel(); glucoseTask = nil; glucoseTaskID = nil
-        glucoseRetryTask?.cancel(); glucoseRetryTask = nil; glucoseRetryID = nil
-        glucoseWakeRequested = false
     }
 
     private func check(_ generation: UUID) throws {
@@ -387,21 +358,20 @@ public final class GlookoService: Service {
     public struct Options {
         public var rememberPassword: Bool
         public var insulinEnabled: Bool
-        public var glucoseEnabled: Bool
         public var allowCellular: Bool
         public var alertThreshold: TimeInterval
         public var authenticationRequired: String?
     }
     public var options: Options {
         queue.sync { .init(rememberPassword: rememberPassword, insulinEnabled: insulinEnabled,
-            glucoseEnabled: glucoseEnabled, allowCellular: allowCellular, alertThreshold: alertThreshold,
+            allowCellular: allowCellular, alertThreshold: alertThreshold,
             authenticationRequired: syncHealth.authenticationRequired) }
     }
-    public func configureUploads(insulin: Bool, glucose: Bool, cellular: Bool) {
+    public func configureUploads(insulin: Bool, cellular: Bool) {
         queue.sync {
             let cookie = client?.sessionCookie
             cancelUploads(); lifecycle = UUID()
-            insulinEnabled = insulin; glucoseEnabled = glucose; allowCellular = cellular
+            insulinEnabled = insulin; allowCellular = cellular
             client = makeClient(cookie: cookie, cellular: allowCellular)
             if let client { observeRequests(client, generation: lifecycle) }
         }
@@ -540,7 +510,6 @@ public final class GlookoService: Service {
     public func uploadIfNeeded(force: Bool = false) async {
         // Carbs are independent of pump eligibility and must also be drained by Upload now.
         async let carbUpload: Void = sendCarbs(force: force)
-        async let glucoseUpload: Void = sendGlucose(force: force)
         let task = queue.sync { () -> Task<Void, Never>? in
             guard onboarded, !deleted, insulinEnabled else { return nil }
             if uploading {
@@ -552,7 +521,6 @@ public final class GlookoService: Service {
         }
         await task?.value
         await carbUpload
-        await glucoseUpload
     }
 
     /// Called on the state queue so cancellation and a follow-up drain cannot lose ownership of a task.
@@ -636,11 +604,11 @@ public final class GlookoService: Service {
                 }
                 try check(generation)
             }
-            var result = try await transport.uploadDeviceFile(prepared.0, extractorName: "InsuletOmnipod")
+            var result = try await transport.uploadDeviceFile(prepared.0)
             if Self.sessionExpiredStatuses.contains(result.status) {
                 transport = try await authenticatedClient(generation, replacing: transport)
                 try check(generation)
-                result = try await transport.uploadDeviceFile(prepared.0, extractorName: "InsuletOmnipod")
+                result = try await transport.uploadDeviceFile(prepared.0)
             }
             try check(generation)
             guard (200..<300).contains(result.status), result.contentType?.lowercased().contains("text/html") != true else {
@@ -866,122 +834,10 @@ public final class GlookoService: Service {
         carbStorageCreated = true
     }
 
-    // Source replay belongs to Loop's RemoteDataServicesManager. Never delete its private query-anchor
-    // UserDefaults keys here. Add/restore uses the host's normal stream queries; explicit remove/re-add
-    // requests the host's available retained history through its own supported lifecycle.
-
-    /// Called on the state queue from Loop's StoredGlucoseSample stream.
-    @discardableResult private func stageGlucose(_ samples: [StoredGlucoseSample]) throws -> Int {
-        guard !deleted, let accountID else { throw ServiceError.signInRequired }
-        if glucose == nil { restoreGlucose(accountID) }
-        guard var outbox = glucose else { throw ServiceError.blocked(glucoseStorageError ?? "Glucose storage is unavailable") }
-        let readings = samples.filter {
-            !$0.wasUserEntered && !$0.isDisplayOnly && $0.condition == nil &&
-            !$0.provenanceIdentifier.lowercased().contains("glooko") &&
-            (($0.device?.manufacturer?.caseInsensitiveCompare("Dexcom") == .orderedSame && $0.device?.model == "G7") ||
-             $0.provenanceIdentifier.lowercased() == "com.dexcom.g7app")
-        }.map {
-            SourceGlucose(id: $0.syncIdentifier ?? $0.uuid?.uuidString ?? "glucose-\($0.startDate.timeIntervalSince1970)",
-                          date: $0.startDate, mgdl: $0.quantity.doubleValue(for: HKUnit(from: "mg/dL")),
-                          utcOffset: TimeZone.current.secondsFromGMT(for: $0.startDate),
-                          origin: $0.provenanceIdentifier.lowercased() == "com.dexcom.g7app" ? .dexcomApp : .directSensor)
-        }
-        try outbox.stage(readings)
-        try saveGlucose(outbox); glucose = outbox
-        return readings.count
-    }
-
-    private func restoreGlucose(_ accountID: String) {
-        do {
-            glucose = try glucoseRepository.load(accountID: accountID, historyStart: history?.historyStart,
-                                                  required: glucoseStorageCreated)
-            glucoseStorageError = nil; currentStatus.glucoseError = nil
-        } catch {
-            glucose = nil; glucoseStorageError = "Could not restore glucose uploads: \(error)"
-            currentStatus.glucoseError = glucoseStorageError
-        }
-    }
-
-    private func saveGlucose(_ outbox: GlucoseOutbox) throws {
-        guard let accountID else { throw ServiceError.signInRequired }
-        try glucoseRepository.save(outbox, accountID: accountID)
-        glucoseStorageCreated = true
-    }
-
-    private func sendGlucose(force: Bool = false) async {
-        let task = queue.sync { () -> Task<Void, Never>? in
-            guard onboarded, !deleted, accountID != nil, glucoseEnabled else { return nil }
-            if force { glucoseRetryTask?.cancel(); glucoseRetryTask = nil; glucoseRetryID = nil }
-            if let task = glucoseTask { glucoseWakeRequested = true; return task }
-            guard force || glucoseRetryTask == nil, glucoseStorageError == nil, glucose?.due.isEmpty == false else { return nil }
-            let generation = lifecycle, id = UUID()
-            glucoseTaskID = id; glucoseWakeRequested = false
-            let task = Task<Void, Never> { [weak self] in await self?.performGlucoseUploads(generation: generation, id: id) }
-            glucoseTask = task
-            return task
-        }
-        await task?.value
-    }
-
-    private func performGlucoseUploads(generation: UUID, id: UUID) async {
-        defer {
-            queue.sync {
-                guard lifecycle == generation, glucoseTaskID == id else { return }
-                glucoseTask = nil; glucoseTaskID = nil
-                if !deleted, onboarded, glucose?.due.isEmpty == false {
-                    let delay = glucoseWakeRequested ? 0 : glucoseRetryDelay
-                    let retry = UUID(); glucoseRetryID = retry
-                    glucoseRetryTask = Task { [weak self] in
-                        do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) } catch { return }
-                        guard let self else { return }
-                        let ready = self.queue.sync { () -> Bool in
-                            guard self.lifecycle == generation, self.glucoseRetryID == retry, !self.deleted else { return false }
-                            self.glucoseRetryTask = nil; self.glucoseRetryID = nil
-                            return true
-                        }
-                        if ready { await self.sendGlucose() }
-                    }
-                    glucoseRetryDelay = min(glucoseRetryDelay * 2, uploadInterval)
-                } else { glucoseRetryDelay = 30 }
-                glucoseWakeRequested = false
-            }
-            changed()
-        }
-        do {
-            var transport = try await authenticatedClient(generation)
-            while true {
-                try check(generation)
-                let batch = queue.sync { Array(glucose?.due.prefix(500) ?? []) }
-                guard !batch.isEmpty else { return }
-                let confirmed: [SourceGlucose]
-                queue.sync { recordDiagnostic("glucose", "Checking \(batch.count) readings, \(batch.first!.minute) through \(batch.last!.minute)") }
-                do { confirmed = try await transport.submitGlucose(batch) }
-                catch GlookoError.authenticationRequired {
-                    transport = try await authenticatedClient(generation, replacing: transport)
-                    try check(generation)
-                    confirmed = try await transport.submitGlucose(batch)
-                }
-                try check(generation)
-                try queue.sync {
-                    guard lifecycle == generation, glucoseTaskID == id, !deleted, var outbox = glucose else { throw CancellationError() }
-                    for reading in confirmed { outbox.confirm(reading) }
-                    outbox.pruneConfirmed(before: Date().addingTimeInterval(-14 * 86400))
-                    try saveGlucose(outbox); glucose = outbox
-                    currentStatus.glucoseError = nil
-                    currentStatus.glucoseDetail = "\(confirmed.count) of \(batch.count) readings verified in Glooko records and graphs"
-                    recordDiagnostic("glucose", "\(confirmed.count) of \(batch.count) readings verified in stored records and graphs")
-                    if !confirmed.isEmpty {
-                        currentStatus.lastGlucoseConfirmedAt = Date()
-                        let latest = confirmed.map(\.date).max()!
-                        let minute = Date(timeIntervalSince1970: floor(latest.timeIntervalSince1970 / 60) * 60)
-                        currentStatus.glucoseThrough = max(currentStatus.glucoseThrough ?? minute, minute)
-                    }
-                }
-                changed()
-                if confirmed.count < batch.count { return }
-            }
-        } catch is CancellationError { }
-        catch { queue.sync { if lifecycle == generation, !deleted { currentStatus.glucoseError = "Glucose not confirmed: \(error)"; recordDiagnostic("glucose error", String(describing: error)) } } }
+    /// Remove only the retired uploader's own cache; Loop's glucose store is never touched.
+    private func removeRetiredGlucoseData(_ accountID: String) {
+        do { try repository.removeRetiredGlucoseData(accountID: accountID); retiredDataCleanupError = nil }
+        catch { retiredDataCleanupError = "Retired upload cache could not be removed: \(error)" }
     }
 
     public func sendTestAlert() {
@@ -998,10 +854,9 @@ public final class GlookoService: Service {
             guard !deleted, onboarded else { return .init(issue: [], retract: []) }
             var pending = Set<GlookoSyncHealth.Stream>()
             if insulinEnabled, history?.hasUnuploadedRecords == true || history?.pending.values.contains(where: { !$0.isMutable && $0.end < Date().addingTimeInterval(-3600) }) == true { pending.insert(.insulin) }
-            if glucoseEnabled, glucose?.due.isEmpty == false { pending.insert(.glucose) }
             if carbs?.due.isEmpty == false { pending.insert(.carbs) }
-            var reason = storageError ?? carbStorageError ?? glucoseStorageError
-            if sourceReplayRequired { reason = currentStatus.glucoseBackfillError }
+            var reason = storageError ?? carbStorageError
+            if sourceReplayRequired { reason = currentStatus.sourceReplayDetail }
             if insulinEnabled {
                 reason = reason ?? history?.blockedReason(now: Date())
                 if Date().timeIntervalSince(connectedAt) > 300 {
@@ -1053,9 +908,6 @@ public final class GlookoService: Service {
         public var checking: Bool
         public var doseQueryDrained: Bool
         public var settingsQueryDrained: Bool
-        public var todayGlucose: Int
-        public var pendingGlucose: Int
-        public var latestAcceptedGlucose: Date?
         public var pendingCarbs: Int
         public var pendingDoses: Int
         public var latestSourceDose: Date?
@@ -1064,13 +916,9 @@ public final class GlookoService: Service {
 
     public var diagnostics: DiagnosticSnapshot {
         queue.sync {
-            let zone = contexts.last?.timeZone ?? .current
-            let day = String(WallClock(timeZone: zone).string(Date()).prefix(10))
-            let readings = glucose?.entries.values.map(\.reading) ?? []
-            return .init(state: diagnosticState, storageError: diagnosticStorageError, checking: inspectionTask != nil,
+            return .init(state: diagnosticState, storageError: diagnosticStorageError ?? retiredDataCleanupError, checking: inspectionTask != nil,
                 doseQueryDrained: doseQueryDrained, settingsQueryDrained: settingsQueryDrained,
-                todayGlucose: readings.filter { $0.minute.hasPrefix(day) }.count, pendingGlucose: glucose?.due.count ?? 0,
-                latestAcceptedGlucose: readings.map(\.date).max(), pendingCarbs: carbs?.due.count ?? 0,
+                pendingCarbs: carbs?.due.count ?? 0,
                 pendingDoses: (history?.pending.count ?? 0) + (history?.unclassified.count ?? 0),
                 latestSourceDose: history?.sourceDoses.values.map(\.start).max(),
                 nextPumpAttempt: currentStatus.lastAttemptAt?.addingTimeInterval(uploadInterval))
@@ -1121,19 +969,18 @@ public final class GlookoService: Service {
                 }
                 do {
                     let transport = try await self.authenticatedClient(generation)
-                    let captured = try self.queue.sync { () throws -> (PumpHistoryLog, [SourceGlucose], TimeZone) in
+                    let captured = try self.queue.sync { () throws -> (PumpHistoryLog, TimeZone) in
                         guard self.lifecycle == generation, !self.deleted, let history = self.history,
-                              let context = self.contexts.last, self.glucoseStorageError == nil,
-                              let glucose = self.glucose else { throw ServiceError.blocked("Source history or glucose storage is unavailable") }
-                        self.recordDiagnostic("live check", "Starting read-only stored-record and graph verification")
-                        return (history, glucose.entries.values.map(\.reading), context.timeZone)
+                              let context = self.contexts.last else { throw ServiceError.blocked("Source history or pump settings are unavailable") }
+                        self.recordDiagnostic("live check", "Starting read-only pump record verification")
+                        return (history, context.timeZone)
                     }
-                    let report = try await transport.inspectSync(history: captured.0, glucose: captured.1, timeZone: captured.2)
+                    let report = try await transport.inspectSync(history: captured.0, timeZone: captured.1)
                     try self.check(generation)
                     self.queue.sync {
                         guard self.lifecycle == generation, !self.deleted else { return }
                         self.diagnosticState.lastInspection = report; self.diagnosticState.inspectionError = nil
-                        self.recordDiagnostic("live check", "Glucose today: \(report.glucose.matchedStored)/\(report.glucose.expected) stored, \(report.glucose.matchedGraphed)/\(report.glucose.expected) graphed; insulin \(report.insulinMatched) matched, \(report.insulinMissing) missing")
+                        self.recordDiagnostic("live check", "Insulin: \(report.insulinMatched) matched, \(report.insulinMissing) missing, \(report.insulinMismatched) different, \(report.insulinDuplicates) duplicate")
                     }
                 } catch is CancellationError { }
                 catch {
@@ -1166,7 +1013,7 @@ public final class GlookoService: Service {
 extension GlookoService: RemoteDataService {
     // Loop follows each changed query with an empty callback. Commit only after that drain boundary.
     public var doseDataLimit: Int? { nil }
-    public var glucoseDataLimit: Int? { 500 }
+    public var glucoseDataLimit: Int? { 0 }
 
     public func uploadDoseData(created: [DoseEntry], deleted: [DoseEntry], completion: @escaping (Result<Bool, Error>) -> Void) {
         do {
@@ -1244,22 +1091,10 @@ extension GlookoService: RemoteDataService {
     }
     public func uploadTemporaryOverrideData(updated: [TemporaryScheduleOverride], deleted: [TemporaryScheduleOverride], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
     public func uploadDosingDecisionData(_ stored: [StoredDosingDecision], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
+    /// This service reports insulin and carbs only. A zero limit makes Loop return an empty query
+    /// without reading its glucose cache; even an unexpected callback cannot store or send samples.
     public func uploadGlucoseData(_ stored: [StoredGlucoseSample], completion: @escaping (Result<Bool, Error>) -> Void) {
-        do {
-            try queue.sync {
-                diagnosticState.lastGlucoseCallback = Date()
-                let count = try stageGlucose(stored)
-                if let latest = stored.map(\.startDate).max() {
-                    diagnosticState.latestGlucoseReceived = max(diagnosticState.latestGlucoseReceived ?? latest, latest)
-                }
-                recordDiagnostic("source", "Glucose callback: \(stored.count) received, \(count) eligible; \(glucose?.due.count ?? 0) awaiting confirmation")
-            }
-            completion(.success(true)); changed()
-            Task { await sendGlucose() }
-        } catch {
-            queue.sync { currentStatus.glucoseError = "Could not store glucose: \(error)"; recordDiagnostic("source error", String(describing: error)) }
-            changed(); completion(.failure(error))
-        }
+        completion(.success(false))
     }
     public func uploadPumpEventData(_ stored: [PersistedPumpEvent], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
     public func uploadCgmEventData(_ stored: [PersistedCgmEvent], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
