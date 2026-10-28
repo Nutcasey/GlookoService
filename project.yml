@@ -4,7 +4,7 @@ name: GlookoService
 options:
   bundleIdPrefix: com.loopkit
   deploymentTarget:
-    iOS: "15.1"
+    iOS: "17.6"
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -27,6 +27,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.loopkit.GlookoServiceTestHost
         GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         CODE_SIGN_ENTITLEMENTS: Tests/GlookoServiceKitTests/Host/Host.entitlements
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
