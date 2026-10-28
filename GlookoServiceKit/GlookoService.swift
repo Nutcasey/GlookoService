@@ -10,6 +10,7 @@ public final class GlookoService: Service {
     public static let stateDidChange = Notification.Name("GlookoServiceStateDidChange")
     public weak var serviceDelegate: ServiceDelegate? { didSet { changed() } }
     public weak var stateDelegate: StatefulPluggableDelegate?
+    public weak var remoteDataServiceDelegate: RemoteDataServiceDelegate?
 
     public struct Status: Equatable {
         public var lastUploadAt: Date?
@@ -309,8 +310,12 @@ public final class GlookoService: Service {
         }
         for key in keys { try credentials.remove(key) }
         if eraseLocalData { try repository.eraseAllLocalData() }
-        for id in GlookoSyncHealth.allNoticeIDs.union(["diagnostic-test"]) {
-            serviceDelegate?.retractAlert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: id))
+        if let issuer = serviceDelegate {
+            Task { @MainActor in
+                for id in GlookoSyncHealth.allNoticeIDs.union(["diagnostic-test"]) {
+                    await issuer.retractAlert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: id))
+                }
+            }
         }
         stateDelegate?.pluginWantsDeletion(self)
         changed()
@@ -769,9 +774,9 @@ public final class GlookoService: Service {
 
     public func sendTestAlert() {
         let content = Alert.Content(title: "Glooko test alert", body: "This checks Loop's Glooko alert delivery. No account or upload failure is being reported.", acknowledgeActionButtonLabel: "OK")
-        DispatchQueue.main.async { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self, !self.queue.sync(execute: { self.deleted }) else { return }
-            self.serviceDelegate?.issueAlert(Alert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: "diagnostic-test"),
+            await self.serviceDelegate?.issueAlert(Alert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: "diagnostic-test"),
                 foregroundContent: content, backgroundContent: content, trigger: .immediate))
         }
     }
@@ -795,13 +800,16 @@ public final class GlookoService: Service {
             return delivery
         }
         guard let issuer = serviceDelegate else { return }
-        for id in evaluation.retract {
-            issuer.retractAlert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: id))
-        }
-        for notice in evaluation.issue {
-            let content = Alert.Content(title: notice.title, body: notice.message, acknowledgeActionButtonLabel: "OK")
-            issuer.issueAlert(Alert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: notice.id),
-                foregroundContent: content, backgroundContent: content, trigger: .immediate))
+        // One task keeps this evaluation's retractions ahead of its issues.
+        Task { @MainActor in
+            for id in evaluation.retract {
+                await issuer.retractAlert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: id))
+            }
+            for notice in evaluation.issue {
+                let content = Alert.Content(title: notice.title, body: notice.message, acknowledgeActionButtonLabel: "OK")
+                await issuer.issueAlert(Alert(identifier: .init(managerIdentifier: Self.pluginIdentifier, alertIdentifier: notice.id),
+                    foregroundContent: content, backgroundContent: content, trigger: .immediate))
+            }
         }
     }
     /// Called on the state queue after a source stream callback.
@@ -941,11 +949,13 @@ public final class GlookoService: Service {
 }
 
 extension GlookoService: RemoteDataService {
+    public var pluginIdentifier: String { Self.pluginIdentifier }
+
     // Loop follows each changed query with an empty callback. Commit only after that drain boundary.
     public var doseDataLimit: Int? { nil }
     public var glucoseDataLimit: Int? { 0 }
 
-    public func uploadDoseData(created: [DoseEntry], deleted: [DoseEntry], completion: @escaping (Result<Bool, Error>) -> Void) {
+    public func uploadDoseData(created: [DoseEntry], deleted: [DoseEntry]) async throws {
         do {
             try queue.sync {
                 guard !self.deleted, let accountID else { throw ServiceError.blocked("Sign in before storing pump history") }
@@ -958,16 +968,15 @@ extension GlookoService: RemoteDataService {
                 diagnosticState.lastDoseCallback = Date()
                 recordDiagnostic("source", "Dose callback: \(created.count) created, \(deleted.count) deleted; drained \(doseQueryDrained)")
             }
-            completion(.success(true))
             changed()
             if created.isEmpty && deleted.isEmpty { Task { await uploadIfNeeded() } }
         } catch {
             queue.sync { currentStatus.lastError = "Could not store source history: \(error)"; recordDiagnostic("source error", String(describing: error)) }
-            changed(); completion(.failure(error))
+            changed(); throw error
         }
     }
 
-    public func uploadSettingsData(_ stored: [StoredSettings], completion: @escaping (Result<Bool, Error>) -> Void) {
+    public func uploadSettingsData(_ stored: [StoredSettings]) async throws {
         do {
             try queue.sync {
                 guard !deleted else { throw CancellationError() }
@@ -987,16 +996,16 @@ extension GlookoService: RemoteDataService {
                 diagnosticState.lastSettingsCallback = Date()
                 recordDiagnostic("source", "Settings callback: \(stored.count) snapshots; drained \(settingsQueryDrained)")
             }
-            changed(); completion(.success(true))
+            changed()
             if stored.isEmpty { Task { await uploadIfNeeded() } }
         } catch {
             queue.sync { currentStatus.lastError = "Could not store source settings: \(error)"; recordDiagnostic("source error", String(describing: error)) }
-            changed(); completion(.failure(error))
+            changed(); throw error
         }
     }
 
-    public func uploadAlertData(_ stored: [SyncAlertObject], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
-    public func uploadCarbData(created: [SyncCarbObject], updated: [SyncCarbObject], deleted: [SyncCarbObject], completion: @escaping (Result<Bool, Error>) -> Void) {
+    public func uploadAlertData(_ stored: [SyncAlertObject]) async throws {}
+    public func uploadCarbData(created: [SyncCarbObject], updated: [SyncCarbObject], deleted: [SyncCarbObject]) async throws {
         do {
             try queue.sync {
                 guard !self.deleted, accountID != nil else { throw ServiceError.blocked("Sign in before storing carbs") }
@@ -1012,22 +1021,19 @@ extension GlookoService: RemoteDataService {
                 try saveCarbs(outbox)
                 carbs = outbox
             }
-            completion(.success(true))
             changed()
             Task { await sendCarbs() }
         } catch {
             queue.sync { currentStatus.carbError = "Could not store carbs: \(error)" }
-            changed(); completion(.failure(error))
+            changed(); throw error
         }
     }
-    public func uploadTemporaryOverrideData(updated: [TemporaryScheduleOverride], deleted: [TemporaryScheduleOverride], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
-    public func uploadDosingDecisionData(_ stored: [StoredDosingDecision], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
+    public func uploadTemporaryOverrideData(updated: [TemporaryScheduleOverride], deleted: [TemporaryScheduleOverride]) async throws {}
+    public func uploadDosingDecisionData(_ stored: [StoredDosingDecision]) async throws {}
     /// This service reports insulin and carbs only. A zero limit makes Loop return an empty query
     /// without reading its glucose cache; even an unexpected callback cannot store or send samples.
-    public func uploadGlucoseData(_ stored: [StoredGlucoseSample], completion: @escaping (Result<Bool, Error>) -> Void) {
-        completion(.success(false))
-    }
-    public func uploadPumpEventData(_ stored: [PersistedPumpEvent], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
-    public func uploadCgmEventData(_ stored: [PersistedCgmEvent], completion: @escaping (Result<Bool, Error>) -> Void) { completion(.success(true)) }
+    public func uploadGlucoseData(_ stored: [StoredGlucoseSample]) async throws {}
+    public func uploadPumpEventData(_ stored: [PersistedPumpEvent]) async throws {}
+    public func uploadCgmEventData(_ stored: [PersistedCgmEvent]) async throws {}
     public func remoteNotificationWasReceived(_ notification: [String: AnyObject]) async throws {}
 }

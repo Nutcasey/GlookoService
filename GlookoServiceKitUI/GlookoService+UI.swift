@@ -8,10 +8,10 @@ extension GlookoService: ServiceUI {
     public static var image: UIImage? {
         UIImage(named: "Glooko", in: Bundle(for: GlookoServiceCoordinator.self), compatibleWith: nil)
     }
-    public static func setupViewController(colorPalette: LoopUIColorPalette, pluginHost: PluginHost) -> SetupUIResult<ServiceViewController, ServiceUI> {
+    public static func setupViewController(colorPalette: LoopUIColorPalette, pluginHost: PluginHost, allowDebugFeatures: Bool) -> SetupUIResult<ServiceViewController, ServiceUI> {
         .userInteractionRequired(GlookoServiceCoordinator(service: nil))
     }
-    public func settingsViewController(colorPalette: LoopUIColorPalette) -> ServiceViewController { GlookoServiceCoordinator(service: self) }
+    public func settingsViewController(colorPalette: LoopUIColorPalette, allowDebugFeatures: Bool) -> ServiceViewController { GlookoServiceCoordinator(service: self) }
 }
 
 final class GlookoServiceCoordinator: UINavigationController, ServiceOnboarding, CompletionNotifying {

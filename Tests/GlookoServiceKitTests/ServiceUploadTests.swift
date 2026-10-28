@@ -1,6 +1,7 @@
 import XCTest
 import HealthKit
 import LoopKit
+import LoopAlgorithm
 import ObjectiveC.runtime
 import GlookoServiceKit
 
@@ -58,11 +59,9 @@ final class ServiceUploadTests: XCTestCase {
                        operation: operation, addedDate: nil, supercededDate: nil)
     }
 
-    private func stage(_ carb: SyncCarbObject, in service: GlookoService) throws {
-        var outcome: Result<Bool, Error>?
-        service.uploadCarbData(created: carb.operation == .create ? [carb] : [], updated: carb.operation == .update ? [carb] : [],
-                               deleted: carb.operation == .delete ? [carb] : []) { outcome = $0 }
-        _ = try XCTUnwrap(outcome).get()
+    private func stage(_ carb: SyncCarbObject, in service: GlookoService) async throws {
+        try await service.uploadCarbData(created: carb.operation == .create ? [carb] : [], updated: carb.operation == .update ? [carb] : [],
+                                         deleted: carb.operation == .delete ? [carb] : [])
     }
 
     private func eventually(timeout: TimeInterval = 5, _ predicate: () -> Bool) async throws {
@@ -74,14 +73,14 @@ final class ServiceUploadTests: XCTestCase {
     private func completeSettings() -> StoredSettings {
         let zone = TimeZone(secondsFromGMT: 0)!
         let settings = StoredSettings(date: start.addingTimeInterval(-1), maximumBasalRatePerHour: 3, maximumBolus: 10,
-            suspendThreshold: GlucoseThreshold(unit: HKUnit(from: "mg/dL"), value: 75),
+            suspendThreshold: GlucoseThreshold(unit: .milligramsPerDeciliter, value: 75),
             basalRateSchedule: BasalRateSchedule(dailyItems: [.init(startTime: 0, value: 1)], timeZone: zone),
-            insulinSensitivitySchedule: InsulinSensitivitySchedule(unit: HKUnit(from: "mg/dL"), dailyItems: [.init(startTime: 0, value: 50)], timeZone: zone),
-            carbRatioSchedule: CarbRatioSchedule(unit: .gram(), dailyItems: [.init(startTime: 0, value: 12)], timeZone: zone),
+            insulinSensitivitySchedule: InsulinSensitivitySchedule(unit: .milligramsPerDeciliter, dailyItems: [.init(startTime: 0, value: 50)], timeZone: zone),
+            carbRatioSchedule: CarbRatioSchedule(unit: .gram, dailyItems: [.init(startTime: 0, value: 12)], timeZone: zone),
             pumpDevice: HKDevice(name: "Offline", manufacturer: "Test", model: "Fixture", hardwareVersion: nil,
                                  firmwareVersion: nil, softwareVersion: nil, localIdentifier: "offline-pump", udiDeviceIdentifier: nil))
         // StoredSettings's target is supplied separately to keep its declaration-order arguments explicit.
-        let target = GlucoseRangeSchedule(unit: HKUnit(from: "mg/dL"), dailyItems: [.init(startTime: 0, value: DoubleRange(minValue: 100, maxValue: 110))], timeZone: zone)!
+        let target = GlucoseRangeSchedule(unit: .milligramsPerDeciliter, dailyItems: [.init(startTime: 0, value: DoubleRange(minValue: 100, maxValue: 110))], timeZone: zone)!
         let complete = StoredSettings(date: settings.date, glucoseTargetRangeSchedule: target,
             maximumBasalRatePerHour: settings.maximumBasalRatePerHour, maximumBolus: settings.maximumBolus,
             suspendThreshold: settings.suspendThreshold, basalRateSchedule: settings.basalRateSchedule,
@@ -97,11 +96,9 @@ final class ServiceUploadTests: XCTestCase {
         let device = HKDevice(name: "Offline sensor", manufacturer: "Dexcom", model: "G7", hardwareVersion: nil,
             firmwareVersion: nil, softwareVersion: nil, localIdentifier: nil, udiDeviceIdentifier: nil)
         let sample = StoredGlucoseSample(syncIdentifier: "retired-upload", startDate: start,
-            quantity: HKQuantity(unit: HKUnit(from: "mg/dL"), doubleValue: 100), device: device)
-        var result: Result<Bool, Error>?
-        restored.uploadGlucoseData([sample]) { result = $0 }
+            quantity: LoopQuantity(unit: .milligramsPerDeciliter, doubleValue: 100), device: device)
+        try await restored.uploadGlucoseData([sample])
         XCTAssertEqual(restored.glucoseDataLimit, 0, "Loop must not query glucose for this service")
-        XCTAssertFalse(try XCTUnwrap(result).get(), "The service must not claim to upload glucose")
         await restored.uploadIfNeeded(force: true)
         XCTAssertTrue(OfflineGlooko.insulinRecords.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: accountFolder.appendingPathComponent("glucose.json").path))
@@ -109,11 +106,11 @@ final class ServiceUploadTests: XCTestCase {
 
     func testARestoredServiceDoesNotAlertWhileLoopDrainsAChangedDoseBatch() async throws {
         let original = try await signedIn()
-        original.uploadSettingsData([completeSettings()]) { _ in }
-        original.uploadSettingsData([]) { _ in }
-        let basal = DoseEntry(type: .basal, startDate: start, endDate: start.addingTimeInterval(3600), value: 1, unit: .unitsPerHour, syncIdentifier: "basal")
-        original.uploadDoseData(created: [basal], deleted: []) { _ in }
-        original.uploadDoseData(created: [], deleted: []) { _ in }
+        try await original.uploadSettingsData([completeSettings()])
+        try await original.uploadSettingsData([])
+        let basal = DoseEntry(type: .basal, startDate: start, endDate: start.addingTimeInterval(3600), value: 1, unit: .unitsPerHour, decisionId: nil, syncIdentifier: "basal")
+        try await original.uploadDoseData(created: [basal], deleted: [])
+        try await original.uploadDoseData(created: [], deleted: [])
         try await eventually { !OfflineGlooko.insulinRecords.isEmpty }
         // Relaunch long after the service was connected, with Loop restarting both source streams.
         var state = original.rawState
@@ -121,14 +118,14 @@ final class ServiceUploadTests: XCTestCase {
         let restored = try XCTUnwrap(GlookoService(rawState: state)); services.append(restored)
         let host = RecordingHost()
         restored.serviceDelegate = host
-        restored.uploadSettingsData([]) { _ in }
-        restored.uploadDoseData(created: [], deleted: []) { _ in }
+        try await restored.uploadSettingsData([])
+        try await restored.uploadDoseData(created: [], deleted: [])
         await MainActor.run {}
-        let next = DoseEntry(type: .basal, startDate: start.addingTimeInterval(3600), endDate: start.addingTimeInterval(4200), value: 0.5, unit: .unitsPerHour, syncIdentifier: "next-basal")
-        restored.uploadDoseData(created: [next], deleted: []) { _ in }
+        let next = DoseEntry(type: .basal, startDate: start.addingTimeInterval(3600), endDate: start.addingTimeInterval(4200), value: 0.5, unit: .unitsPerHour, decisionId: nil, syncIdentifier: "next-basal")
+        try await restored.uploadDoseData(created: [next], deleted: [])
         await MainActor.run {}
-        restored.uploadDoseData(created: [], deleted: []) { _ in }
-        await MainActor.run {}
+        try await restored.uploadDoseData(created: [], deleted: [])
+        try await Task.sleep(nanoseconds: 200_000_000)
         let issued = await MainActor.run { host.issued }
         XCTAssertFalse(issued.contains { $0.identifier.alertIdentifier == "uploads-paused" },
                        "A changed batch followed by Loop's drain is normal operation: \(issued.map(\.foregroundContent?.body))")
@@ -138,7 +135,7 @@ final class ServiceUploadTests: XCTestCase {
         let service = try await signedIn()
         OfflineGlooko.expireSessionAndRejectPassword()
         OfflineGlooko.hold("POST /api/v3/users/sign_in")
-        try stage(carb(20), in: service)
+        try await stage(carb(20), in: service)
         try await eventually { OfflineGlooko.hasHeldRequest }
         let check = Task { await service.checkGlookoNow() }
         try await eventually { service.diagnostics.checking }
@@ -155,9 +152,9 @@ final class ServiceUploadTests: XCTestCase {
     func testAnEditDuringSubmissionIsDrainedAndReadbackUsesRecentUpdateTime() async throws {
         let service = try await signedIn()
         OfflineGlooko.hold("PUT /api/v2/foods")
-        try stage(carb(20), in: service)
+        try await stage(carb(20), in: service)
         try await eventually { OfflineGlooko.hasHeldRequest }
-        try stage(carb(45, version: 2, operation: .update), in: service)
+        try await stage(carb(45, version: 2, operation: .update), in: service)
         OfflineGlooko.release()
         try await eventually { service.summary.pendingCarbs == 0 }
         XCTAssertEqual(OfflineGlooko.foodWriteCount, 2)
@@ -169,7 +166,7 @@ final class ServiceUploadTests: XCTestCase {
     func testUploadNowRetriesCarbsEvenWithoutAnEligiblePump() async throws {
         let service = try await signedIn()
         OfflineGlooko.failNextFoodWrite()
-        try stage(carb(20), in: service)
+        try await stage(carb(20), in: service)
         try await eventually { service.status.carbError != nil }
         XCTAssertEqual(service.summary.pendingCarbs, 1)
         await service.uploadIfNeeded(force: true)
@@ -181,7 +178,7 @@ final class ServiceUploadTests: XCTestCase {
     func testFailedCarbsRetryWithoutAnotherSourceCallback() async throws {
         let service = try await signedIn()
         OfflineGlooko.failNextFoodWrite()
-        try stage(carb(20), in: service)
+        try await stage(carb(20), in: service)
         try await eventually { service.status.carbError != nil }
         try await eventually(timeout: 40) { service.summary.pendingCarbs == 0 }
         XCTAssertEqual(OfflineGlooko.foodWriteCount, 2)
@@ -189,14 +186,14 @@ final class ServiceUploadTests: XCTestCase {
 
     func testDamagedOrMissingLegacyCarbStorageRejectsDeletionWithoutReplacingIt() async throws {
         let service = try await signedIn()
-        try stage(carb(20), in: service)
+        try await stage(carb(20), in: service)
         try await eventually { service.summary.pendingCarbs == 0 }
         let file = accountFolder.appendingPathComponent("carbs.json")
         let damaged = Data("damaged acknowledged outbox".utf8)
         try damaged.write(to: file)
         let restored = try XCTUnwrap(GlookoService(rawState: service.rawState)); services.append(restored)
         XCTAssertNotNil(restored.status.carbError)
-        XCTAssertThrowsError(try stage(carb(20, operation: .delete), in: restored))
+        do { try await stage(carb(20, operation: .delete), in: restored); XCTFail("Expected staging to be rejected") } catch {}
         XCTAssertEqual(try Data(contentsOf: file), damaged)
         XCTAssertEqual(OfflineGlooko.foodWriteCount, 1)
 
@@ -209,14 +206,14 @@ final class ServiceUploadTests: XCTestCase {
         try FileManager.default.removeItem(at: accountFolder.appendingPathComponent("carbs-initialised"))
         let legacy = try XCTUnwrap(GlookoService(rawState: legacyState)); services.append(legacy)
         XCTAssertNotNil(legacy.status.carbError)
-        XCTAssertThrowsError(try stage(carb(20, operation: .delete), in: legacy))
+        do { try await stage(carb(20, operation: .delete), in: legacy); XCTFail("Expected staging to be rejected") } catch {}
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
         XCTAssertEqual(OfflineGlooko.foodWriteCount, 1)
     }
 
     func testDeletionCancelsTheMultiRequestCarbOperation() async throws {
         let service = try await signedIn()
-        try stage(carb(20), in: service)
+        try await stage(carb(20), in: service)
         try await eventually { service.summary.pendingCarbs == 0 }
         let file = accountFolder.appendingPathComponent("carbs.json")
         var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
@@ -224,7 +221,7 @@ final class ServiceUploadTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: legacy).write(to: file)
         let restored = try XCTUnwrap(GlookoService(rawState: service.rawState)); services.append(restored)
         OfflineGlooko.hold("PUT /api/v2/meals")
-        restored.uploadCarbData(created: [], updated: [], deleted: []) { _ in }
+        try await restored.uploadCarbData(created: [], updated: [], deleted: [])
         try await eventually { OfflineGlooko.hasHeldRequest }
         restored.completeDelete()
         OfflineGlooko.release()
@@ -236,22 +233,22 @@ final class ServiceUploadTests: XCTestCase {
 
     func testSourceDeletionDuringAuthenticationIsAppliedBeforeInsulinSubmission() async throws {
         let service = try await signedIn()
-        service.uploadSettingsData([completeSettings()]) { _ in }
-        service.uploadSettingsData([]) { _ in }
-        service.uploadDoseData(created: [], deleted: []) { _ in }
+        try await service.uploadSettingsData([completeSettings()])
+        try await service.uploadSettingsData([])
+        try await service.uploadDoseData(created: [], deleted: [])
         await service.uploadIfNeeded(force: true)
         // Finish the initial empty-source callbacks before establishing the authentication interleaving.
         try await Task.sleep(nanoseconds: 100_000_000)
-        let basal = DoseEntry(type: .basal, startDate: start, endDate: start.addingTimeInterval(3600), value: 1, unit: .unitsPerHour, syncIdentifier: "basal")
-        let bolus = DoseEntry(type: .bolus, startDate: start.addingTimeInterval(600), value: 1, unit: .units, deliveredUnits: 1, syncIdentifier: "bolus")
+        let basal = DoseEntry(type: .basal, startDate: start, endDate: start.addingTimeInterval(3600), value: 1, unit: .unitsPerHour, decisionId: nil, syncIdentifier: "basal")
+        let bolus = DoseEntry(type: .bolus, startDate: start.addingTimeInterval(600), value: 1, unit: .units, decisionId: nil, deliveredUnits: 1, syncIdentifier: "bolus")
         // Later delivery lets the basal's second clock hour finish; an hour is never sent past the latest evidence.
-        let after = DoseEntry(type: .tempBasal, startDate: start.addingTimeInterval(3600), endDate: Date().addingTimeInterval(-1800), value: 0, unit: .unitsPerHour, syncIdentifier: "after")
+        let after = DoseEntry(type: .tempBasal, startDate: start.addingTimeInterval(3600), endDate: Date().addingTimeInterval(-1800), value: 0, unit: .unitsPerHour, decisionId: nil, syncIdentifier: "after")
         OfflineGlooko.hold("GET /api/v2/users")
-        service.uploadDoseData(created: [basal, bolus, after], deleted: []) { _ in }
-        service.uploadDoseData(created: [], deleted: []) { _ in }
+        try await service.uploadDoseData(created: [basal, bolus, after], deleted: [])
+        try await service.uploadDoseData(created: [], deleted: [])
         try await eventually { OfflineGlooko.hasHeldRequest }
-        service.uploadDoseData(created: [], deleted: [bolus]) { _ in }
-        service.uploadDoseData(created: [], deleted: []) { _ in }
+        try await service.uploadDoseData(created: [], deleted: [bolus])
+        try await service.uploadDoseData(created: [], deleted: [])
         OfflineGlooko.release()
         try await eventually { !OfflineGlooko.insulinRecords.isEmpty && service.summary.pendingDoses == 0 }
         let records = OfflineGlooko.insulinRecords
@@ -268,10 +265,11 @@ final class ServiceUploadTests: XCTestCase {
         try FileManager.default.removeItem(at: accountFolder.appendingPathComponent("insulin-initialised"))
         try Data("damaged history".utf8).write(to: accountFolder.appendingPathComponent("pump-history.json"))
         let restored = try XCTUnwrap(GlookoService(rawState: state)); services.append(restored)
-        let bolus = DoseEntry(type: .bolus, startDate: start, value: 1, unit: .units, deliveredUnits: 1, syncIdentifier: "bolus")
-        var outcome: Result<Bool, Error>?
-        restored.uploadDoseData(created: [bolus], deleted: []) { outcome = $0 }
-        XCTAssertThrowsError(try XCTUnwrap(outcome).get(), "Loop must keep the dose until the history is restored")
+        let bolus = DoseEntry(type: .bolus, startDate: start, value: 1, unit: .units, decisionId: nil, deliveredUnits: 1, syncIdentifier: "bolus")
+        do {
+            try await restored.uploadDoseData(created: [bolus], deleted: [])
+            XCTFail("Loop must keep the dose until the history is restored")
+        } catch {}
         XCTAssertFalse(FileManager.default.fileExists(atPath: accountFolder.appendingPathComponent("insulin.json").path))
     }
 
@@ -377,10 +375,10 @@ private final class RecordingHost: ServiceDelegate {
     var issued: [Alert] = []
     let hostIdentifier = "com.loopkit.GlookoServiceKitTests"
     let hostVersion = "1"
-    func issueAlert(_ alert: Alert) { issued.append(alert) }
-    func retractAlert(identifier: Alert.Identifier) {}
+    func issueAlert(_ alert: Alert) async { issued.append(alert) }
+    func retractAlert(identifier: Alert.Identifier) async {}
     func enactRemoteOverride(name: String, durationTime: TimeInterval?, remoteAddress: String) async throws {}
     func cancelRemoteOverride() async throws {}
     func deliverRemoteCarbs(amountInGrams: Double, absorptionTime: TimeInterval?, foodType: String?, startDate: Date?) async throws {}
-    func deliverRemoteBolus(amountInUnits: Double) async throws {}
+    func deliverRemoteBolus(amountInUnits: Double, decisionId: UUID?) async throws {}
 }

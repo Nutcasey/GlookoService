@@ -24,5 +24,9 @@
 	<string>Glooko</string>
 	<key>com.loopkit.Loop.ServiceIdentifier</key>
 	<string>GlookoService</string>
+	<key>com.loopkit.Loop.ServiceCategory</key>
+	<string>Remote Data</string>
+	<key>com.loopkit.Loop.PluginSubtitle</key>
+	<string>Upload insulin and carbs to your Glooko account</string>
 </dict>
 </plist>

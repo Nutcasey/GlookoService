@@ -2,6 +2,7 @@ import Foundation
 import HealthKit
 import CryptoKit
 import LoopKit
+import LoopAlgorithm
 
 struct ReportingContext: Codable, Equatable {
     var date: Date
@@ -61,12 +62,12 @@ struct ReportingContext: Codable, Equatable {
             problem = "Loop has an invalid insulin action duration"
             return
         }
-        let mgdl = HKUnit.gramUnit(with: .milli).unitDivided(by: .literUnit(with: .deci))
+        let mgdl = LoopUnit.milligramsPerDeciliter
         let therapy = IBFPumpSettings(
             basal: values(basal.items, { $0 }), carbRatio: values(ratio.items, { $0 }),
-            sensitivityMGDL: values(sensitivity.items, { HKQuantity(unit: sensitivity.unit, doubleValue: $0).doubleValue(for: mgdl) }),
-            targetMGDL: values(target.items, { HKQuantity(unit: target.unit, doubleValue: $0.minValue).doubleValue(for: mgdl) }),
-            correctionThresholdMGDL: values(target.items, { HKQuantity(unit: target.unit, doubleValue: $0.maxValue).doubleValue(for: mgdl) }),
+            sensitivityMGDL: values(sensitivity.items, { LoopQuantity(unit: sensitivity.unit, doubleValue: $0).doubleValue(for: mgdl) }),
+            targetMGDL: values(target.items, { LoopQuantity(unit: target.unit, doubleValue: $0.minValue).doubleValue(for: mgdl) }),
+            correctionThresholdMGDL: values(target.items, { LoopQuantity(unit: target.unit, doubleValue: $0.maxValue).doubleValue(for: mgdl) }),
             maximumBolus: maximumBolus, maximumBasal: maximumBasal, insulinActionMinutes: Int((action / 60).rounded()),
             minimumGlucoseMGDL: threshold.quantity.doubleValue(for: mgdl),
             glucoseDisplayMMOL: stored.bloodGlucoseUnit?.unitString.lowercased().contains("mol") == true)
