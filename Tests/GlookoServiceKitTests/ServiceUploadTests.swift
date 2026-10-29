@@ -46,9 +46,9 @@ final class ServiceUploadTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func signedIn() async throws -> GlookoService {
+    private func signedIn(historyStart: Date = Date(timeIntervalSince1970: 0)) async throws -> GlookoService {
         let service = GlookoService(); services.append(service)
-        _ = try await service.signIn(email: "offline@example.test", password: "invented", historyStart: Date(timeIntervalSince1970: 0), rememberPassword: true, insulinEnabled: true, allowCellular: true)
+        _ = try await service.signIn(email: "offline@example.test", password: "invented", historyStart: historyStart, rememberPassword: true, insulinEnabled: true, allowCellular: true)
         return service
     }
 
@@ -70,7 +70,7 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertTrue(predicate(), "Expected the observable operation to finish before its deadline")
     }
 
-    private func completeSettings() -> StoredSettings {
+    private func completeSettings(insulinType: InsulinType? = nil, date: Date? = nil) -> StoredSettings {
         let zone = TimeZone(secondsFromGMT: 0)!
         let settings = StoredSettings(date: start.addingTimeInterval(-1), maximumBasalRatePerHour: 3, maximumBolus: 10,
             suspendThreshold: GlucoseThreshold(unit: .milligramsPerDeciliter, value: 75),
@@ -81,12 +81,46 @@ final class ServiceUploadTests: XCTestCase {
                                  firmwareVersion: nil, softwareVersion: nil, localIdentifier: "offline-pump", udiDeviceIdentifier: nil))
         // StoredSettings's target is supplied separately to keep its declaration-order arguments explicit.
         let target = GlucoseRangeSchedule(unit: .milligramsPerDeciliter, dailyItems: [.init(startTime: 0, value: DoubleRange(minValue: 100, maxValue: 110))], timeZone: zone)!
-        let complete = StoredSettings(date: settings.date, glucoseTargetRangeSchedule: target,
+        let complete = StoredSettings(date: date ?? settings.date, glucoseTargetRangeSchedule: target,
             maximumBasalRatePerHour: settings.maximumBasalRatePerHour, maximumBolus: settings.maximumBolus,
-            suspendThreshold: settings.suspendThreshold, basalRateSchedule: settings.basalRateSchedule,
+            suspendThreshold: settings.suspendThreshold, insulinType: insulinType, basalRateSchedule: settings.basalRateSchedule,
             insulinSensitivitySchedule: settings.insulinSensitivitySchedule, carbRatioSchedule: settings.carbRatioSchedule,
             pumpDevice: settings.pumpDevice)
         return complete
+    }
+
+    /// The adapter must retain per-dose insulin and time settings fallbacks to delivery, not upload time.
+    func testSelectedInsulinUsesOriginalDosesAndHistoricalSettings() async throws {
+        start = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970 / 3600) * 3600 - 10800)
+        let service = try await signedIn(historyStart: start)
+        try await service.uploadSettingsData([
+            completeSettings(insulinType: .novolog),
+            completeSettings(insulinType: .humalog, date: start.addingTimeInterval(3600))
+        ])
+        try await service.uploadSettingsData([])
+        let doses = [
+            DoseEntry(type: .bolus, startDate: start.addingTimeInterval(600), value: 2, unit: .units, decisionId: nil,
+                      deliveredUnits: 2, syncIdentifier: "original-type", insulinType: .lyumjev),
+            DoseEntry(type: .bolus, startDate: start.addingTimeInterval(1800), value: 1, unit: .units, decisionId: nil,
+                      deliveredUnits: 1, syncIdentifier: "old-settings"),
+            DoseEntry(type: .bolus, startDate: start.addingTimeInterval(5400), value: 3, unit: .units, decisionId: nil,
+                      deliveredUnits: 3, syncIdentifier: "new-settings"),
+            DoseEntry(type: .basal, startDate: start.addingTimeInterval(3000), endDate: start.addingTimeInterval(4200),
+                      value: 1, unit: .unitsPerHour, decisionId: nil, syncIdentifier: "spans-drug-change")
+        ]
+        try await service.uploadDoseData(created: doses, deleted: [])
+        try await service.uploadDoseData(created: [], deleted: [])
+        await service.uploadIfNeeded(force: true)
+        try await eventually { OfflineGlooko.insulinRecords.filter { $0["insulinType"] as? String == "bolus" }.count == 3 }
+        let records = OfflineGlooko.insulinRecords
+        for (units, name) in [(2.0, "Lyumjev"), (1.0, "Novolog"), (3.0, "Humalog")] {
+            let row = try XCTUnwrap(records.first { $0["insulinType"] as? String == "bolus" && ($0["value"] as? NSNumber)?.doubleValue == units })
+            XCTAssertEqual(row["name"] as? String, name + " via Loop")
+            XCTAssertTrue(row["medicationGuid"] is NSNull)
+        }
+        let basal = records.filter { $0["insulinType"] as? String == "basal" }
+        XCTAssertFalse(basal.isEmpty)
+        XCTAssertTrue(basal.allSatisfy { $0["name"] as? String == "Insulin via Loop" }, "A dose spanning a settings change has no single known insulin")
     }
 
     func testLegacyGlucoseSettingCannotSubscribeStoreOrUploadReadings() async throws {
@@ -118,8 +152,12 @@ final class ServiceUploadTests: XCTestCase {
         let restored = try XCTUnwrap(GlookoService(rawState: state)); services.append(restored)
         let host = RecordingHost()
         restored.serviceDelegate = host
+        await restored.uploadIfNeeded(force: true)
+        XCTAssertNotNil(restored.status.lastError, "The initial upload must wait for both source queries")
         try await restored.uploadSettingsData([])
         try await restored.uploadDoseData(created: [], deleted: [])
+        await restored.uploadIfNeeded(force: true)
+        XCTAssertNil(restored.status.lastError, "A drained empty queue must clear its resolved source-wait message")
         await MainActor.run {}
         let next = DoseEntry(type: .basal, startDate: start.addingTimeInterval(3600), endDate: start.addingTimeInterval(4200), value: 0.5, unit: .unitsPerHour, decisionId: nil, syncIdentifier: "next-basal")
         try await restored.uploadDoseData(created: [next], deleted: [])

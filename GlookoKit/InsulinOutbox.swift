@@ -15,6 +15,8 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
         public var units: Double
         public var deleted: Bool
         public var externalID: String
+        /// Nil only for entries saved before display names were uploaded.
+        public var name: String? = nil
     }
 
     public struct Tracked: Codable, Equatable, Sendable {
@@ -62,14 +64,18 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
     }
 
     /// Recomputes the wanted entries. Known entries no longer wanted become deletions; unsent ones are dropped.
-    public mutating func refresh(now: Date) {
+    public mutating func refresh(now: Date, insulinName: (SourceDose) -> String? = { $0.insulinName }) {
+        // Metadata-only upgrade: keep the same GUID, amount and time. Never guess an old dose's drug.
+        for (guid, tracked) in entries where !tracked.current.deleted && tracked.current.name == nil {
+            entries[guid]?.current.name = Self.displayName([nil])
+        }
         var wanted: [String: Entry] = [:]
         for dose in doses.values where dose.kind == .bolus && !dose.isMutable && dose.end <= now.addingTimeInterval(-Self.bolusSettle) {
             let units = Self.rounded(dose.delivered ?? dose.programmed)
             guard units > 0 else { continue }
             let guid = identity("loop-insulin-bolus|\(dose.id)")
             wanted[guid] = Entry(guid: guid, kind: .bolus, start: dose.start, units: units, deleted: false,
-                                 externalID: "loop:bolus:\(guid.prefix(8).lowercased())")
+                                 externalID: "loop:bolus:\(guid.prefix(8).lowercased())", name: Self.displayName([insulinName(dose)]))
         }
         let horizon = basalHorizon(now: now)
         let hours = Self.completeHours(from: reportingStart, through: horizon)
@@ -81,7 +87,11 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
             let hourDay = Int(floor(hour.timeIntervalSince1970 / 86400))
             if hourDay != day { day = hourDay; running = 0 }
             let before = Self.rounded(running)
-            running += doses.values.reduce(0) { $0 + Self.basalVolume($1, from: from, to: to) }
+            let contributions = doses.values.compactMap { dose -> (Double, String?)? in
+                let units = Self.basalVolume(dose, from: from, to: to)
+                return units > 0 ? (units, insulinName(dose)) : nil
+            }
+            running += contributions.reduce(0) { $0 + $1.0 }
             let units = Self.rounded(Self.rounded(running) - before)
             guard units > 0 else { continue }
             // A whole hour has one identity. A partial first hour also names its start, so a later reporting
@@ -90,7 +100,7 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
             let seed = from == hour ? "\(epoch)" : "\(epoch)|from:\(Int(from.timeIntervalSince1970.rounded(.down)))"
             let guid = identity("loop-insulin-basal|\(seed)")
             wanted[guid] = Entry(guid: guid, kind: .basal, start: from, units: units, deleted: false,
-                                 externalID: "loop:basal:\(seed)")
+                                 externalID: "loop:basal:\(seed)", name: Self.displayName(contributions.map(\.1)))
         }
         let lastHourEnd = hours.last?.addingTimeInterval(3600) ?? reportingStart
         for (guid, tracked) in entries where wanted[guid] == nil {
@@ -104,6 +114,20 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
             if entries[guid] == nil { entries[guid] = Tracked(current: entry, confirmed: nil, submitted: false) }
             else { entries[guid]?.current = entry }
         }
+    }
+
+    /// Keep the hourly quantity/identity intact if an hour contains more than one insulin.
+    private static func displayName(_ names: [String?]) -> String {
+        let known = Set(names.compactMap { value -> String? in
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+            return value
+        })
+        guard !known.isEmpty else { return "Insulin via Loop" }
+        var labels = known.sorted()
+        if names.contains(where: { $0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false }) {
+            labels.append("unknown insulin")
+        }
+        return labels.joined(separator: " / ") + " via Loop"
     }
 
     /// The current GUID for a seed, moving past a revision Glooko holds (or may hold) as deleted.
@@ -181,7 +205,8 @@ public extension GlookoRecords {
     /// A delivered insulin entry with no medication. Glooko counts it as device insulin of the declared type.
     static func deliveredInsulin(_ entry: InsulinOutbox.Entry, timeZone: TimeZone) -> [String: Any] {
         insulin(guid: entry.guid, timestamp: entry.start, units: entry.units, type: entry.kind.rawValue,
-                deleted: entry.deleted, extra: ["medicationGuid": NSNull(), "deviceDelivered": 1, "externalId": entry.externalID],
+                deleted: entry.deleted, extra: ["medicationGuid": NSNull(), "deviceDelivered": 1, "externalId": entry.externalID,
+                                               "name": entry.name ?? "Insulin via Loop"],
                 timeZone: timeZone)
     }
 }
@@ -251,6 +276,7 @@ public extension GlookoClient {
             return units.map { abs($0 - entry.units) < 0.0005 } == true &&
                 record["insulinType"] as? String == entry.kind.rawValue &&
                 (record["deviceDelivered"] as? Bool) == true && (medication == nil || medication is NSNull) &&
+                (entry.name == nil || record["name"] as? String == entry.name) &&
                 stamp == WallClock(timeZone: timeZone).string(entry.start).prefix(19)
         default: return false
         }

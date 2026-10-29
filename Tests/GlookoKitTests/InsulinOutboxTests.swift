@@ -94,4 +94,51 @@ final class InsulinOutboxTests: XCTestCase {
         outbox.refresh(now: at(180))
         XCTAssertEqual(outbox.due.map(\.units), [0.667])
     }
+
+    /// Drug names survive restarts; upgrading an older cache updates labels without duplicating delivery.
+    func testInsulinNamesAndLegacyUpgradePreserveDeliveryIdentitiesAndQuantities() throws {
+        func named(_ dose: SourceDose, _ name: String) throws -> SourceDose {
+            // Exercise the persisted source contract, including an older reader which ignores the new field.
+            var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(dose)) as? [String: Any])
+            json["insulinName"] = name
+            return try JSONDecoder().decode(SourceDose.self, from: JSONSerialization.data(withJSONObject: json))
+        }
+        var outbox = InsulinOutbox(reportingStart: hour)
+        outbox.stage(created: [try named(temp("first", 0, 30, 0.6), "Fiasp"),
+                               try named(temp("second", 30, 60, 0.9), "Humalog"),
+                               temp("unknown", 60, 120, 0.3),
+                               try named(bolus("b", 10, 1.25), "Fiasp")], deleted: [])
+        outbox.refresh(now: at(180))
+        let original = outbox.due
+        let zone = TimeZone(secondsFromGMT: 0)!
+        let labels = original.compactMap { GlookoRecords.deliveredInsulin($0, timeZone: zone)["name"] as? String }
+        XCTAssertEqual(Set(labels), ["Fiasp / Humalog via Loop", "Fiasp via Loop", "Insulin via Loop"])
+        sendAll(&outbox)
+        var restored = try JSONDecoder().decode(InsulinOutbox.self, from: JSONEncoder().encode(outbox))
+        restored.refresh(now: at(180))
+        XCTAssertTrue(restored.due.isEmpty, "A restart must not resend confirmed labels")
+
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(outbox)) as? [String: Any])
+        var entries = try XCTUnwrap(legacy["entries"] as? [String: [String: Any]])
+        for id in entries.keys {
+            for field in ["current", "confirmed"] {
+                var entry = try XCTUnwrap(entries[id]?[field] as? [String: Any])
+                entry.removeValue(forKey: "name")
+                entries[id]?[field] = entry
+            }
+        }
+        var doses = try XCTUnwrap(legacy["doses"] as? [String: [String: Any]])
+        for id in doses.keys { doses[id]?.removeValue(forKey: "insulinName") }
+        legacy["entries"] = entries; legacy["doses"] = doses
+        restored = try JSONDecoder().decode(InsulinOutbox.self, from: JSONSerialization.data(withJSONObject: legacy))
+        restored.refresh(now: at(180))
+        XCTAssertEqual(restored.due.count, original.count)
+        for entry in restored.due {
+            let old = try XCTUnwrap(original.first { $0.guid == entry.guid })
+            XCTAssertEqual(entry.units, old.units)
+            XCTAssertEqual(entry.start, old.start)
+            XCTAssertEqual(entry.kind, old.kind)
+            XCTAssertEqual(GlookoRecords.deliveredInsulin(entry, timeZone: zone)["name"] as? String, "Insulin via Loop")
+        }
+    }
 }

@@ -570,7 +570,7 @@ public final class GlookoService: Service {
                     guard lifecycle == generation, !deleted, var outbox = insulin else { throw CancellationError() }
                     for entry in result.confirmed { outbox.confirm(entry) }
                     for entry in result.heldDeleted { outbox.supersede(entry) }
-                    if !result.heldDeleted.isEmpty { outbox.refresh(now: Date()) }
+                    if !result.heldDeleted.isEmpty { outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:)) }
                     try saveInsulin(outbox)
                     currentStatus.lastUploadAt = Date(); currentStatus.verificationDetail = result.detail
                     recordDiagnostic("insulin", result.detail)
@@ -595,7 +595,9 @@ public final class GlookoService: Service {
         guard let accountID else { throw ServiceError.signInRequired }
         if insulin == nil { restoreInsulin(accountID) }
         guard var outbox = insulin else { throw ServiceError.blocked(insulinStorageError ?? "Insulin storage is unavailable") }
-        guard doseQueryDrained, settingsQueryDrained else { throw ServiceError.blocked("Waiting for Loop to finish reading source history and settings") }
+        let waitingForSource = "Waiting for Loop to finish reading source history and settings"
+        guard doseQueryDrained, settingsQueryDrained else { throw ServiceError.blocked(waitingForSource) }
+        if currentStatus.lastError == waitingForSource { currentStatus.lastError = nil }
         guard !contexts.isEmpty else { throw ServiceError.blocked("Waiting for Loop's pump settings") }
         let captured = contexts
         let before = outbox.doses.count
@@ -606,12 +608,20 @@ public final class GlookoService: Service {
         if outbox.doses.count < before {
             recordDiagnostic("source", "Excluded \(before - outbox.doses.count) doses from a simulator or unknown pump")
         }
-        outbox.refresh(now: Date())
+        outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:))
         outbox.prune(now: Date())
         if outbox != insulin { try saveInsulin(outbox) }
         guard contexts.last?.isRealPump == true || outbox.due.isEmpty == false else {
             throw ServiceError.blocked("Uploads are paused while a real pump source is unavailable")
         }
+    }
+
+    /// An original dose wins. A settings fallback must cover its own delivery time without a drug change.
+    private func reportedInsulinName(for dose: SourceDose) -> String? {
+        if let name = dose.insulinName { return name }
+        guard let context = contexts.last(where: { $0.date <= dose.start }), let name = context.insulinName,
+              !contexts.contains(where: { $0.date > dose.start && $0.date < dose.end && $0.insulinName != name }) else { return nil }
+        return name
     }
 
     /// A failed restoration remains visible. A first run cuts over from the retired pump-file history.
