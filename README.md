@@ -264,6 +264,18 @@ Earlier versions used a virtual Omnipod/IBF compatibility route and a LibreView 
 | `Tests/GlookoServiceKitTests/` | Actual iOS service, persistence, Keychain and intercepted transport |
 | `Documentation/Loop/` | Current next-dev host integration and historical dev patch |
 
+### Request identity
+
+Requests identify this project honestly:
+
+```http
+User-Agent: Loop-GlookoService (+https://github.com/Nutcasey/GlookoService)
+```
+
+The client sends no `deviceInformation` header or login-body field, fabricated device ID/serial, or Glooko application version, build number or Git hash. It does not add the Glooko website's `Origin` or `Referer`, including on the retained legacy file-upload helper. The login body contains the account credentials under the endpoint's `user` or `userLogin` key.
+
+On **29 October 2026**, an isolated EU account accepted sign-in, basal and bolus writes, carb creation/amendment, retries, exact readback and confirmed deletions with this identity. All pre-existing insulin and food records remained unchanged. These checks cover the active generic-entry routes; the retired file-upload route was not exercised against the live server. The integration still uses Glooko's patient-app API, which can change independently of this project.
+
 Current write routes are `PUT /api/v2/insulins` and `PUT /api/v2/foods`. A sync-complete request follows submission. Legacy meal records can be retired during carb migration. Insulin files, virtual reporting devices and the old device-file upload endpoint are not the current service’s upload path.
 
 For the standalone core:
@@ -282,7 +294,7 @@ Verification recorded on **29 October 2026**:
 
 | Boundary | Evidence |
 |---|---|
-| Core | 39 passing tests; labels, original quantities, persistence and old-cache upgrades |
+| Core | 40 passing tests; request identity, labels, original quantities, persistence and old-cache upgrades |
 | iOS service | 11 passing integration tests; per-dose insulin, historical settings, authentication, cancellation, retries and source draining |
 | Isolated live API | Production uploader added names to existing GUIDs, replayed without duplicates, corrected a synthetic name and verified cleanup |
 | Device integration | Signed installation, restored real-pump/insulin context and authenticated readback |
