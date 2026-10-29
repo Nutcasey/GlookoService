@@ -11,6 +11,7 @@ public struct GlookoSyncInspection: Codable, Sendable {
     public var insulinDuplicates: Int
     public var insulinDeferred: Int
     public var reportWarnings: [String]
+    public var glucose: GlucoseVerification? = nil
 }
 
 public extension GlookoClient {

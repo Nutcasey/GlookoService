@@ -1,10 +1,10 @@
 # GlookoService — Loop → Glooko
 
-GlookoService is a reporting plugin for Loop. It sends **delivered pump insulin** and **carbohydrate entries** to an EU-hosted Glooko account.
+GlookoService is a reporting plugin for Loop. It sends **sensor glucose**, **delivered pump insulin** and **carbohydrate entries** to an EU-hosted Glooko account.
 
 **Use `main` from this repository with Loop and LoopKit `next-dev`.** The async next-dev integration and insulin-name support are part of `main`.
 
-The service does not deliver insulin, change therapy settings, accept remote treatment commands or upload glucose. It uses Glooko’s patient-app session API; it is an unofficial integration, not Glooko’s official uploader.
+Glucose uploads default to **on** and can be disabled independently. The service does not deliver insulin, change therapy settings or accept remote treatment commands. It uses Glooko’s patient-app session API; it is an unofficial integration, not Glooko’s official uploader.
 
 ## Contents
 
@@ -29,10 +29,10 @@ The service does not deliver insulin, change therapy settings, accept remote tre
 | Basal and temporary basal delivery | Delivered units aggregated into each clock hour | Basal-rate profiles, temporary-basal intervals, suspension/resumption events and zero-delivery hours |
 | Carb entry | A standalone food entry containing grams and its timestamp | Meal classification, food description, absorption time and other nutritional information |
 | Insulin selection | A text name such as `Fiasp via Loop`, attached to the corresponding delivery | A structured association with Glooko’s medication catalogue |
-| Glucose / CGM data | Nothing | All glucose uploads; use a separate supported CGM connection |
+| Sensor glucose, including direct Dexcom and Libre connections | CGM readings through the LibreView CSV importer, with minute timestamps and values to 0.01 mg/dL | Native sensor attribution, trend/rate metadata, manual, display-only, qualified and simulator readings |
 | Therapy settings and pump status | Local context for identifying the source, timing and insulin selection | Uploading settings or registering a new pump in Glooko |
 
-Manually entered insulin doses in Loop are excluded. The pump simulator and sources without an identifiable real pump are excluded from insulin reporting. Carb uploads remain independent of pump eligibility.
+Manually entered insulin doses in Loop are excluded. The pump simulator and sources without an identifiable real pump are excluded from insulin reporting. Carb and glucose uploads remain independent of pump eligibility. Glucose is taken from the readings supplied by Loop; using a manufacturer app is not required. Glooko labels this route **Abbott/CSV**, including when the readings came from Dexcom. This limitation is shown in the setup and status screens.
 
 ## Build and install
 
@@ -71,10 +71,11 @@ After installation, **Glooko** should appear under Loop **Settings → Add Servi
 1. Open **Settings → Add Service → Glooko** in Loop.
 2. Enter the credentials for your EU Glooko account.
 3. Choose whether to enable **Upload insulin**. It defaults to **off** for a new installation; carb foods are independent.
-4. Choose **Allow cellular data** if wanted. New installations default to Wi-Fi-only requests and do not use constrained/Low Data Mode networks.
-5. Decide whether to enable **Remember password for session recovery**. Without it, the service saves the session and asks you to sign in again when recovery is needed.
-6. Choose **Send history from**. It defaults to now and allows up to seven days back, subject to the history Loop still holds.
-7. Tap **Sign in**. Open the saved service to see its status, queues and diagnostics.
+4. Leave **Upload glucose** on to report Loop’s sensor readings, or turn it off if another connection already uploads them to Glooko. The switch defaults to **on**, including when upgrading a version without this option.
+5. Choose **Allow cellular data** if wanted. New installations default to Wi-Fi-only requests and do not use constrained/Low Data Mode networks.
+6. Decide whether to enable **Remember password for session recovery**. Without it, the service saves the session and asks you to sign in again when recovery is needed.
+7. Choose **Send history from**. It defaults to now and allows up to seven days back, subject to the history Loop still holds.
+8. Tap **Sign in**. Open the saved service to see its status, queues and diagnostics.
 
 Reconnecting an account with retained local history resumes its existing reporting period. A new date selection does not silently discard that saved history or start it over.
 
@@ -86,7 +87,7 @@ Reconnecting an account with retained local history resumes its existing reporti
 </tr>
 </table>
 
-*Actual captures from the existing iPhone 18 Pro simulator. Account fields are empty in these setup images. Outer Loop navigation can differ between builds.*
+*Actual captures from the existing iPhone 18 Pro simulator. These setup images predate the glucose switch; the current Glucose section is shown below. Account fields are empty. Outer Loop navigation can differ between builds.*
 
 ## How uploads work
 
@@ -96,10 +97,13 @@ flowchart LR
     C["Loop carb changes"] --> D["Saved carb queue"]
     B --> E["Account-bound Glooko session"]
     D --> E
-    E --> F["Glooko insulin + food entries"]
+    H["Loop sensor readings"] --> I["Saved glucose queue"]
+    I --> E
+    E --> F["Glooko insulin + food + CGM entries"]
     F --> G["Read back exact records"]
     G --> B
     G --> D
+    G --> I
 ```
 
 The service saves incoming source changes before acknowledging them to Loop. Insulin preparation waits for **both** the dose and settings queries to finish. A page containing data is not treated as a finished query.
@@ -111,6 +115,14 @@ The local queues retain responsibility until Glooko returns the expected records
 Records have stable identifiers. Retrying updates the same record rather than intentionally creating another copy. Changes and deletions from Loop are staged against those identities. If a deleted insulin entry is needed again, it receives a new revision because Glooko does not revive its deleted GUID.
 
 Carbs use their own queue and retry path. Editing a carb entry updates the same food identity; deleting it soft-deletes that food. Failed carb uploads can retry without another source change. **Upload now** also retries carbs when insulin reporting is disabled or blocked.
+
+Glucose has a separate persistent queue. It waits for the glucose source query to finish, checks for existing readings, then submits missing readings as a LibreView-format CSV. Confirmation requires the expected value in **both stored CGM records and graph data**. Replaying an accepted reading does not intentionally upload another copy. A conflicting or duplicate minute is reported for review rather than overwritten.
+
+Open **Settings → Glooko → Glucose → Upload glucose** to stop or resume this stream. Turning it off cancels its active request and retries, preserves queued readings and leaves insulin and carbs enabled according to their own settings. It cannot retract a request already accepted by Glooko or remove existing server data. The choice survives restarting Loop. After re-enabling, retained work resumes; further source history arrives through Loop’s normal queries.
+
+<img src="Documentation/Screenshots/glucose.png" width="360" alt="Current Glooko Glucose section in Loop, showing the enabled Upload glucose switch, confirmation times and waiting count">
+
+*Actual simulator capture of the restored glucose feature. Zero confirmations are expected here because CGM Simulator readings are excluded. Positive upload checks are recorded under Verification.*
 
 ## Insulin names and Loop attribution
 
@@ -154,8 +166,11 @@ Older generic entries retained locally are queued for name updates using their e
 | Bolus | 10 minutes after it finishes | It must be final, within the reporting period and from an eligible source |
 | Basal hour | 15 minutes after the hour ends | Delivery evidence must reach the hour end; mutable data can delay it |
 | Carbs | After Loop delivers the saved change | No insulin settling delay; connection and retry state still apply |
+| Glucose | After the glucose source query finishes | Upload glucose must be on; the reading must pass source and conflict checks |
 
 Automatic insulin attempts are throttled to a **15-minute interval** and are driven by Loop’s source activity. They are not a guarantee of delivery at an exact wall-clock time. **Upload now** bypasses that throttle, but not source-query completion, settling or mutable-delivery checks.
+
+Glucose does not use the insulin settling delay or 15-minute throttle. Pending readings are submitted in batches of up to 500. Failed attempts retry from 30 seconds, increasing to a maximum 15-minute delay while Loop can execute. **Upload now** also retries glucose when enabled.
 
 Example: reporting starts at **08:20**, and a bolus finishes at **08:25**. That bolus is eligible from **08:35**. The partial basal hour **08:20–09:00** is eligible from **09:15**, if its delivery evidence is final.
 
@@ -163,7 +178,7 @@ iOS can suspend Loop’s execution. Network availability, Wi-Fi-only settings, a
 
 ## Find and verify your data
 
-In Glooko, use **Daily log** for insulin and food entries. Carb-only entries are standalone foods; the web Diet panel can remain empty for them. A separate CGM connection is needed for glucose.
+In Glooko, use **Daily log** for insulin and food entries. Carb-only entries are standalone foods; the web Diet panel can remain empty for them. Use the glucose graphs for uploaded CGM readings and include the **Abbott/CSV** source when filtering data. This source label comes from Glooko’s LibreView importer; it does not identify the original sensor manufacturer. Disable this plugin’s glucose uploads if a separate CGM connection already supplies the same readings.
 
 Glooko [distinguishes device-delivered and manually entered insulin](https://support.glooko.com/hc/en-gb/articles/360001739738-How-is-my-insulin-data-displayed-in-the-Glooko-app). These uploads set the device-delivery flag. That does not provide a full pump timeline, a settings report or an official Loop integration.
 
@@ -173,7 +188,7 @@ In Loop, open **Settings → Glooko**:
 - **Last confirmed** records a successful record readback.
 - **Entries waiting** counts prepared entries still needing confirmation. It does not count every unfinished dose that may become eligible later.
 - **Basal ready through** shows the current delivery-evidence and settling horizon. It is not proof of preparation or upload. **Basal confirmed through** records acknowledged hourly coverage.
-- Carb confirmation and waiting counts are shown separately.
+- Carb and glucose confirmation and waiting counts are shown separately. The glucose switch is in the **Glucose** section, below insulin status.
 
 <table>
 <tr><th>Upload status and controls</th><th>Independent readback</th></tr>
@@ -187,9 +202,9 @@ In Loop, open **Settings → Glooko**:
 
 ### What Check Glooko now proves
 
-**Diagnostics and live check → Check Glooko now** fetches Glooko’s insulin records again and compares the locally confirmed entries with the server. It does not send insulin, advance acknowledgements or certify the whole Glooko account.
+**Diagnostics and live check → Check Glooko now** fetches Glooko’s insulin and CGM records again and compares locally confirmed entries with the server. Glucose counts show expected, stored and graphed readings, plus duplicate minutes. It does not send data, advance acknowledgements or certify the whole Glooko account.
 
-Check the date and counts. “Every confirmed insulin entry matched” with **0 matched** is not evidence of a dose transfer. Nor does a successful record check prove that every Glooko dashboard or clinic report uses the same source-selection rules.
+Check the date and counts. “Every confirmed insulin entry matched” with **0 matched** is not evidence of a dose transfer. The same applies to zero expected glucose readings. Nor does a successful record check prove that every Glooko dashboard or clinic report uses the same source-selection rules.
 
 Diagnostics also show source callbacks, query completion, prepared queues, confirmation times and recent request results. The service retains up to **250 events for 48 hours**. Request traces omit headers, query parameters, bodies, passwords and cookies.
 
@@ -207,6 +222,9 @@ The share control exports a diagnostic report. It still contains health-data tim
 | Session expired / sign-in needed | Use Sign in again. Optional password recovery cannot handle every account or authentication challenge |
 | Wi-Fi-only and nothing moves | Wait for Wi-Fi or explicitly enable cellular; constrained/Low Data Mode networking remains disabled |
 | Accepted but not confirmed | The queue stays pending. Inspect readback/request results; an HTTP success is insufficient |
+| Glucose switch missing | Install a build containing this feature, then open Settings → Glooko and scroll to Glucose |
+| Glucose appears as Abbott/CSV with a Dexcom sensor | Expected importer attribution; the CSV route cannot preserve native sensor identity |
+| Glucose waiting or conflicting minute | Check query completion, network, and diagnostics. A different or duplicated server reading is not overwritten. Check other connected uploaders |
 | Food visible but Diet empty | Standalone carb foods can appear in Daily log/Graphs without populating the Diet panel |
 | Older summaries differ | Inspect the date range and older imported sources. This plugin does not certify or repair all historical Glooko aggregates |
 
@@ -233,7 +251,7 @@ Upload history and diagnostics are stored in the app’s protected, account-scop
 - **Disconnect and keep history:** stop the service and remove its credentials; retain upload history for reconnection.
 - **Erase local data and remove:** after a second confirmation, remove this plugin’s local history, archives, diagnostics and credentials from the app.
 
-Neither option erases Loop’s original source records or data already stored in Glooko. Disabling **Upload insulin** retains queued insulin; carb foods remain independent.
+Neither option erases Loop’s original source records or data already stored in Glooko. Disabling **Upload insulin** or **Upload glucose** retains that stream’s queued records; carb foods remain independent.
 
 ## Limits and historical uploads
 
@@ -241,18 +259,21 @@ Neither option erases Loop’s original source records or data already stored in
 - Zero-delivery hours are omitted. Both user-requested and automatic pump boluses are ordinary bolus entries in Glooko.
 - Quantities are prepared to three decimal places. Glooko can round graph points and summary statistics further; raw record confirmation and displayed totals have different precision.
 - Historical travel, time-zone changes and repeated local times around clock changes are not fully reconstructed. Do not assume complete historical timing fidelity across those cases.
-- Only retained Loop history and locally retained upload records can be recovered. The local insulin queue retains recent history for about 14 days while protecting unconfirmed work.
+- Only retained Loop history and locally retained upload records can be recovered. The local insulin and glucose queues retain recent history for about 14 days while protecting unconfirmed work.
 - Previously imported records remain in Glooko. Duplicate data from independently connected uploaders is not automatically deduplicated across those separate routes.
-- Glucose, manual injection entries, meal descriptions, insulin concentrations and structured catalogue-drug links are not uploaded.
+- Glucose CSV timestamps have minute precision. Corrections and repeated local clock minutes with different offsets cannot be represented safely; conflicts stop acknowledgement of the affected source page. Sensor values are rounded to 0.01 mg/dL for transport, while original readings remain in local storage.
+- Glucose source identity is Abbott/CSV in Glooko, even for Dexcom. A native source-preserving CGM write route has not been established. The tested patient API CGM PUT route returned “Not available”.
+- Manual injection entries, meal descriptions, insulin concentrations and structured catalogue-drug links are not uploaded.
 - Other Glooko regions, MFA and a public, supported OAuth write contract are not implemented. The patient-app API can change independently of this project.
 
-Earlier versions used a virtual Omnipod/IBF compatibility route and a LibreView glucose importer. **The active service uses neither.** The remaining Omnipod/IBF code supports old stored history and migration. Insulin cut-over starts at the previous route’s submitted boundary, or its unsubmitted history start, to avoid intentionally counting the same delivery twice. Older native pump records are not relabelled or amended by the new generic-entry path.
+Earlier versions used a virtual Omnipod/IBF compatibility route for insulin. **The active insulin service does not use that route.** Glucose now uses the LibreView CSV importer, with a new protected queue distinct from the retired glucose cache. The remaining Omnipod/IBF code supports old stored history and migration. Insulin cut-over starts at the previous route’s submitted boundary, or its unsubmitted history start, to avoid intentionally counting the same delivery twice. Older native pump records are not relabelled or amended by the new generic-entry path.
 
 ## Developer reference
 
 | Path | Role |
 |---|---|
 | `GlookoKit/InsulinOutbox.swift` | Delivered-volume aggregation, persistent insulin queue, names, amendments and exact readback |
+| `GlookoKit/GlucoseOutbox.swift` | Persistent CGM queue, replay/conflict checks, CSV submission, stored-record and graph readback |
 | `GlookoKit/CarbOutbox.swift` | Source-owned food identities, changes, deletion, confirmation and older meal migration |
 | `GlookoKit/GlookoClient.swift`, `SyncReader.swift` | Session transport and complete paginated reads |
 | `GlookoKit/SyncHealth.swift`, `SyncDiagnostics.swift` | Alert state and bounded diagnostic history |
@@ -272,11 +293,11 @@ Requests identify this project honestly:
 User-Agent: Loop-GlookoService (+https://github.com/Nutcasey/GlookoService)
 ```
 
-The client sends no `deviceInformation` header or login-body field, fabricated device ID/serial, or Glooko application version, build number or Git hash. It does not add the Glooko website's `Origin` or `Referer`, including on the retained legacy file-upload helper. The login body contains the account credentials under the endpoint's `user` or `userLogin` key.
+The client sends no `deviceInformation` header or login-body field, fabricated device ID/serial, or Glooko application version, build number or Git hash. It does not add the Glooko website's `Origin` or `Referer`, including on glucose CSV uploads and the retained legacy file-upload helper. The login body contains the account credentials under the endpoint's `user` or `userLogin` key.
 
-On **29 October 2026**, an isolated EU account accepted sign-in, basal and bolus writes, carb creation/amendment, retries, exact readback and confirmed deletions with this identity. All pre-existing insulin and food records remained unchanged. These checks cover the active generic-entry routes; the retired file-upload route was not exercised against the live server. The integration still uses Glooko's patient-app API, which can change independently of this project.
+On **29 October 2026**, an isolated EU account accepted sign-in, basal and bolus writes, carb creation/amendment, retries, exact readback and confirmed deletions with this identity. All pre-existing insulin and food records remained unchanged. The restored glucose sender also uploaded two synthetic readings to the isolated account and verified both stored records and graphs, without creating duplicates on replay. The integration still uses Glooko's patient-app API, which can change independently of this project.
 
-Current write routes are `PUT /api/v2/insulins` and `PUT /api/v2/foods`. A sync-complete request follows submission. Legacy meal records can be retired during carb migration. Insulin files, virtual reporting devices and the old device-file upload endpoint are not the current service’s upload path.
+Current write routes are `PUT /api/v2/insulins`, `PUT /api/v2/foods` and, for glucose, `POST /api/v3/device/file/upload?extractorName=LibreviewCSV`. A sync-complete request follows submission. Legacy meal records can be retired during carb migration. Insulin files and virtual insulin-reporting devices are not the current insulin upload path.
 
 For the standalone core:
 
@@ -294,12 +315,15 @@ Verification recorded on **29 October 2026**:
 
 | Boundary | Evidence |
 |---|---|
-| Core | 40 passing tests; request identity, labels, original quantities, persistence and old-cache upgrades |
-| iOS service | 11 passing integration tests; per-dose insulin, historical settings, authentication, cancellation, retries and source draining |
+| Core | 42 passing tests; request identity, labels, original quantities, persistence and old-cache upgrades |
+| iOS service | 14 passing integration tests; service-boundary checks cover default-on glucose, disabling and restart persistence, Dexcom/Libre units, source filtering, query draining, cancellation, retry and damaged storage alongside insulin/carbs |
 | Isolated live API | Production uploader added names to existing GUIDs, replayed without duplicates, corrected a synthetic name and verified cleanup |
 | Simulator workflow | Fresh sign-in, cancellation, alerts, carb creation/edit/deletion, repeated Upload now, restart recovery and simulator-insulin exclusion |
 | Device integration | Clean `03af1ca` installed on the Ultimate iPhone; 20 existing confirmed insulin entries matched, with 0 missing/different |
+| Glucose live API | Two synthetic readings accepted and matched in raw CGM records and graphs; replay produced no duplicates and all 12 pre-existing readings remained unchanged |
 | Documentation UI | Real captures from the existing `loop` simulator, using empty setup fields and an isolated account |
+
+The two synthetic CGM points are retained only in the isolated test account because individual CGM deletion through this importer is not established. No synthetic glucose is sent to the clinical account.
 
 The [simulator validation record](.log/261029-1538-simulator-end-to-end-validation.md) gives the actual workflow and failure-test results. The carb cycle reused one Glooko food GUID through 27 g → 34 g → deletion; all 227 pre-existing insulin records and 14 pre-existing food records remained unchanged.
 

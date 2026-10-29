@@ -128,7 +128,8 @@ public final class GlookoClient: @unchecked Sendable {
         }
         try Task.checkCancellation()
         let upload: GlookoRequestTrace.Upload? = method == "PUT" && url.path == "/api/v2/insulins" ? .insulin :
-            method == "PUT" && url.path == "/api/v2/foods" ? .carbs : nil
+            method == "PUT" && url.path == "/api/v2/foods" ? .carbs :
+            method == "POST" && url.path == "/api/v3/device/file/upload" && url.query?.contains("extractorName=LibreviewCSV") == true ? .glucose : nil
         let started = Date()
         let data: Data, response: URLResponse
         do { (data, response) = try await session.data(for: req, delegate: RefuseRedirects.shared) }

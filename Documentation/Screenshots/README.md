@@ -16,3 +16,9 @@ These images show the plugin UI. They do not show Glooko’s own Daily log or es
 | [setup-options.png](setup-options.png) | Upload choices, reporting start and sign-in controls | 1206 × 2622 | `c08186905076e1ed337aef613cf7cdc0adcf3eff7351fa74630f7bda94b33742` |
 | [status.png](status.png) | Insulin queue, reporting period, Upload now and independent carb status | 1206 × 2622 | `01625bed3557bd052f0f748ca7ab63c0c197e3c678283152fc6264b8a3e780a1` |
 | [diagnostics.png](diagnostics.png) | Dated read-only check, completed source queries and empty queues | 1206 × 2622 | `126b79aa01beb1521eef3dc6eaebf468063cf8256264e6b0613448251351d552` |
+
+## Restored glucose control
+
+[glucose.png](glucose.png) was captured at **17:53 GMT on 29 October 2026** on the same simulator. It shows the new **Glucose → Upload glucose** switch enabled, confirmation fields and source-attribution explanation. This build used `76a6439` plus the uncommitted glucose restoration; the other images above remain captures of the earlier build. It is an unmodified native **1206 × 2622** PNG, SHA-256 `58cadf63d184d3b142be22cfd182f76e0a2c808316c416c18820aec90135d10b`.
+
+The isolated account is scrolled off screen. CGM Simulator readings were excluded, hence zero confirmations. The control was subsequently switched off, Loop was terminated and relaunched, and the off value was observed again before restoring it to on. Positive glucose writes and exact graph readback were exercised separately using the production client and synthetic readings in the isolated test account.

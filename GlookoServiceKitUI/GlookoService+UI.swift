@@ -34,12 +34,12 @@ final class GlookoServiceCoordinator: UINavigationController, ServiceOnboarding,
 
     private func signInController(isSetup: Bool) -> UIViewController {
         let model = SignInModel(email: service?.email ?? "", askForStart: isSetup, options: service?.options)
-        model.signIn = { [weak self, weak model] email, password, historyStart, remember, insulin, cellular in
+        model.signIn = { [weak self, weak model] email, password, historyStart, remember, insulin, cellular, glucose in
             guard let self else { throw CancellationError() }
             self.signInCancelled = false
             let candidate = self.service ?? GlookoService()
             self.pendingService = candidate
-            _ = try await candidate.signIn(email: email, password: password, historyStart: historyStart, rememberPassword: remember, insulinEnabled: insulin, allowCellular: cellular)
+            _ = try await candidate.signIn(email: email, password: password, historyStart: historyStart, rememberPassword: remember, insulinEnabled: insulin, allowCellular: cellular, glucoseEnabled: glucose)
             try Task.checkCancellation()
             guard !self.signInCancelled else { throw CancellationError() }
             model?.finished = true
@@ -94,9 +94,10 @@ final class GlookoServiceCoordinator: UINavigationController, ServiceOnboarding,
     @Published var historyStart = Date()
     @Published var rememberPassword = false
     @Published var insulinEnabled = false
+    @Published var glucoseEnabled = true
     @Published var allowCellular = false
     let askForStart: Bool
-    var signIn: @MainActor (String, String, Date?, Bool, Bool, Bool) async throws -> Void = { _, _, _, _, _, _ in }
+    var signIn: @MainActor (String, String, Date?, Bool, Bool, Bool, Bool) async throws -> Void = { _, _, _, _, _, _, _ in }
     var cancelled: () -> Void = {}
     private var task: Task<Void, Never>?
     var finished = false
@@ -104,7 +105,7 @@ final class GlookoServiceCoordinator: UINavigationController, ServiceOnboarding,
     init(email: String, askForStart: Bool, options: GlookoService.Options?) {
         self.email = email; self.askForStart = askForStart
         rememberPassword = options?.rememberPassword ?? false; insulinEnabled = options?.insulinEnabled ?? false
-        allowCellular = options?.allowCellular ?? false
+        allowCellular = options?.allowCellular ?? false; glucoseEnabled = options?.glucoseEnabled ?? true
     }
 
     func submit() {
@@ -115,10 +116,10 @@ final class GlookoServiceCoordinator: UINavigationController, ServiceOnboarding,
         let email = self.email.trimmingCharacters(in: .whitespacesAndNewlines)
         let secret = password
         let start = askForStart ? historyStart : nil
-        let remember = rememberPassword, insulin = insulinEnabled, cellular = allowCellular
+        let remember = rememberPassword, insulin = insulinEnabled, cellular = allowCellular, glucose = glucoseEnabled
         password = ""
         task = Task { [weak self] in
-            do { try await action(email, secret, start, remember, insulin, cellular) }
+            do { try await action(email, secret, start, remember, insulin, cellular, glucose) }
             catch { if !Task.isCancelled { self?.error = String(describing: error) } }
             self?.busy = false
             self?.task = nil
@@ -150,8 +151,9 @@ struct SignInView: View {
                 Toggle("Remember password for session recovery", isOn: $model.rememberPassword).disabled(model.busy)
                     .accessibilityIdentifier("glooko-remember-password")
             }
-            Section(header: Text("Uploads"), footer: Text("Insulin entries show the insulin name recorded by Loop followed by ‘via Loop’. Older doses with no saved insulin name show ‘Insulin via Loop’. Carb food entries are independent. This service does not upload glucose.")) {
+            Section(header: Text("Uploads"), footer: Text("Insulin entries show the insulin name recorded by Loop followed by ‘via Loop’. Older doses with no saved insulin name show ‘Insulin via Loop’. Carb food entries are independent. Glucose uses Glooko’s LibreView CSV importer and appears as Abbott/CSV data, including readings from Dexcom.")) {
                 Toggle("Upload insulin", isOn: $model.insulinEnabled).disabled(model.busy)
+                Toggle("Upload glucose", isOn: $model.glucoseEnabled).disabled(model.busy).accessibilityIdentifier("glooko-glucose-enabled")
                 Toggle("Allow cellular data", isOn: $model.allowCellular).disabled(model.busy)
             }
             if model.askForStart {
@@ -190,9 +192,9 @@ struct SignInView: View {
             .receive(on: RunLoop.main).sink { [weak self] _ in self?.refresh() }
     }
     func refresh() { snapshot = service.snapshot; options = service.options }
-    func configure(insulin: Bool? = nil, cellular: Bool? = nil) {
+    func configure(insulin: Bool? = nil, cellular: Bool? = nil, glucose: Bool? = nil) {
         service.configureUploads(insulin: insulin ?? options.insulinEnabled,
-            cellular: cellular ?? options.allowCellular); refresh()
+            cellular: cellular ?? options.allowCellular, glucose: glucose ?? options.glucoseEnabled); refresh()
     }
     func forgetPassword() {
         do { try service.stopRememberingPassword(); recoveryError = nil; refresh() }
@@ -269,7 +271,7 @@ struct StatusView: View {
                     Text("2 hours").tag(TimeInterval(7200)); Text("4 hours").tag(TimeInterval(14400))
                 }
             }
-            Section(header: Text("Upload routes"), footer: Text("Basal and bolus entries show the insulin name recorded by Loop followed by ‘via Loop’. Older doses with no saved insulin name show ‘Insulin via Loop’. Local queued insulin is retained when its upload is disabled. Carb foods are independent. Glucose is not uploaded by this service. Wi-Fi-only requests wait for Wi-Fi.")) {
+            Section(header: Text("Upload routes"), footer: Text("Basal and bolus entries show the insulin name recorded by Loop followed by ‘via Loop’. Older doses with no saved insulin name show ‘Insulin via Loop’. Local queued insulin is retained when its upload is disabled. Carb foods are independent. Glucose uses the LibreView CSV importer and appears as Abbott/CSV data, including Dexcom readings. Wi-Fi-only requests wait for Wi-Fi.")) {
                 Toggle("Upload insulin", isOn: Binding(get: { model.options.insulinEnabled }, set: { model.configure(insulin: $0) })).accessibilityIdentifier("glooko-insulin-enabled")
                 Toggle("Allow cellular data", isOn: Binding(get: { model.options.allowCellular }, set: { model.configure(cellular: $0) }))
             }
@@ -287,6 +289,15 @@ struct StatusView: View {
                 }
                 Button(model.uploading ? "Uploading…" : "Upload now") { model.uploadNow() }
                     .disabled(model.uploading).accessibilityIdentifier("glooko-upload-now")
+            }
+            Section(header: Text("Glucose"), footer: Text("Uploads sensor readings supplied by Loop, including direct Dexcom and Libre connections. Defaults to on. Turn it off if another connection already sends glucose. Glooko labels these as Abbott/CSV imports; timestamps have minute precision. Simulator, manual and display-only readings are excluded.")) {
+                Toggle("Upload glucose", isOn: Binding(get: { model.options.glucoseEnabled }, set: { model.configure(glucose: $0) }))
+                    .accessibilityIdentifier("glooko-glucose-enabled")
+                row("Last confirmed", text(model.snapshot.status.lastGlucoseConfirmedAt))
+                row("Readings confirmed through", text(model.snapshot.status.glucoseThrough))
+                row("Waiting to send", String(model.snapshot.summary.pendingGlucose)).accessibilityIdentifier("glooko-glucose-waiting")
+                if let detail = model.snapshot.status.glucoseDetail { Text(detail).foregroundColor(.secondary) }
+                if model.options.glucoseEnabled, let error = model.snapshot.status.glucoseError { Text(error).foregroundColor(.red) }
             }
             Section(header: Text("Carbs"), footer: Text("Carbs entered in Loop are sent as Glooko food entries soon after you save them. Edits and deletions update the same entry.")) {
                 row("Last confirmed", text(model.snapshot.status.lastCarbConfirmedAt))

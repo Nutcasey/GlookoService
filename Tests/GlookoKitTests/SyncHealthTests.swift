@@ -44,7 +44,7 @@ final class SyncHealthTests: XCTestCase {
         for owner in ["one", "two"] {
             let folder = root.appendingPathComponent(GlookoAccount(id: owner, email: "").storageKey)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            for name in ["pump-history.json", "carbs.json", "glucose.json", "glucose-initialised"] {
+            for name in ["pump-history.json", "carbs.json", "glucose.json", "glucose-initialised", "glucose-v2.json", "glucose-v2-initialised"] {
                 try Data(name.utf8).write(to: folder.appendingPathComponent(name))
             }
         }
@@ -52,6 +52,8 @@ final class SyncHealthTests: XCTestCase {
         try repository.removeRetiredGlucoseData(accountID: "one")
         let own = root.appendingPathComponent(GlookoAccount(id: "one", email: "").storageKey)
         XCTAssertFalse(FileManager.default.fileExists(atPath: own.appendingPathComponent("glucose.json").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: own.appendingPathComponent("glucose-v2.json").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: own.appendingPathComponent("glucose-v2-initialised").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: own.appendingPathComponent("glucose-initialised").path))
         XCTAssertEqual(try String(contentsOf: own.appendingPathComponent("pump-history.json")), "pump-history.json")
         XCTAssertEqual(try String(contentsOf: own.appendingPathComponent("carbs.json")), "carbs.json")

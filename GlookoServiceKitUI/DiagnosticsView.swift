@@ -26,7 +26,7 @@ import GlookoServiceKit
             lines += ["Latest read-only verification (JSON):", String(decoding: encoded, as: UTF8.self)]
         }
         for error in [data.storageError, data.state.inspectionError, snapshot.status.lastError,
-                      snapshot.status.carbError].compactMap({ $0 }) {
+                      snapshot.status.carbError, snapshot.status.glucoseError].compactMap({ $0 }) {
             lines.append("Error: " + GlookoClient.redact(error))
         }
         lines += data.state.events.map { "\($0.date) [\($0.category)] \($0.message)" }
@@ -53,7 +53,7 @@ struct DiagnosticsView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section(footer: Text("This fetches Glooko's stored insulin entries again. It does not send data or prove which screen the Glooko app is displaying.")) {
+                Section(footer: Text("This fetches Glooko's stored insulin and acknowledged glucose again. It does not send data or prove which screen the Glooko app is displaying.")) {
                     Button(model.checking || model.data.checking ? "Checking Glooko…" : "Check Glooko now") { model.check() }
                         .disabled(model.checking || model.data.checking).accessibilityIdentifier("glooko-live-check")
                     if let report = model.data.state.lastInspection {
@@ -74,6 +74,10 @@ struct DiagnosticsView: View {
                     row("Settings query finished", model.data.settingsQueryDrained ? "Yes" : "No")
                     row("Insulin entries waiting", String(model.data.pendingDoses))
                     row("Carbs awaiting confirmation", String(model.data.pendingCarbs))
+                    row("Glucose query finished", model.data.glucoseQueryDrained ? "Yes" : "No")
+                    row("Glucose awaiting confirmation", String(model.data.pendingGlucose))
+                    row("Last glucose callback", time(model.data.state.lastGlucoseCallback))
+                    row("Last glucose confirmation", time(model.snapshot.status.lastGlucoseConfirmedAt))
                     row("Last carb confirmation", time(model.snapshot.status.lastCarbConfirmedAt))
                     row("Basal ready through", time(model.snapshot.summary.committedThrough))
                     row("Last insulin sent", time(model.snapshot.status.lastUploadAt))
@@ -81,11 +85,16 @@ struct DiagnosticsView: View {
                     if let report = model.data.state.lastInspection {
                         row("Insulin entries matched", String(report.insulinMatched))
                         row("Missing / different", "\(report.insulinMissing) / \(report.insulinMismatched)")
+                        if let glucose = report.glucose {
+                            row("Glucose expected", String(glucose.expected))
+                            row("Glucose stored / graphed", "\(glucose.matchedStored) / \(glucose.matchedGraphed)")
+                            row("Glucose duplicate minutes", String(glucose.duplicates))
+                        }
                     }
-                    ForEach([model.snapshot.status.lastError, model.snapshot.status.carbError].compactMap { $0 }, id: \.self) { Text($0).foregroundColor(.red) }
+                    ForEach([model.snapshot.status.lastError, model.snapshot.status.carbError, model.snapshot.status.glucoseError].compactMap { $0 }, id: \.self) { Text($0).foregroundColor(.red) }
                 }
                 Section(header: Text("Finding data in Glooko")) {
-                    Text("Open Daily log for dose and food entries. Use your separate CGM connection for glucose; this service does not upload it.")
+                    Text("Open Daily log for dose and food entries. Glucose sent by Loop uses the LibreView CSV importer and appears as Abbott/CSV data in Glooko.")
                     if let report = model.data.state.lastInspection { ForEach(report.reportWarnings, id: \.self) { Text($0).foregroundColor(.orange) } }
                 }
                 Section(header: Text("Recent activity"), footer: Text("The last 250 events are retained for up to 48 hours in this account's protected storage. Requests record the route, result, duration and byte counts; headers, query parameters and bodies are excluded.")) {
