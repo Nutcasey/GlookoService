@@ -319,7 +319,7 @@ Verification recorded on **29 October 2026**:
 | iOS service | 14 passing integration tests; service-boundary checks cover default-on glucose, disabling and restart persistence, Dexcom/Libre units, source filtering, query draining, cancellation, retry and damaged storage alongside insulin/carbs |
 | Isolated live API | Production uploader added names to existing GUIDs, replayed without duplicates, corrected a synthetic name and verified cleanup |
 | Simulator workflow | Fresh sign-in, cancellation, alerts, carb creation/edit/deletion, repeated Upload now, restart recovery and simulator-insulin exclusion |
-| Device integration | Clean `03af1ca` installed on the Ultimate iPhone; 20 existing confirmed insulin entries matched, with 0 missing/different |
+| Device integration | Clean `f71a78f` installed on the Ultimate iPhone; 91 glucose readings matched stored records and graphs with no duplicates, and all 21 insulin entries matched |
 | Glucose live API | Two synthetic readings accepted and matched in raw CGM records and graphs; replay produced no duplicates and all 12 pre-existing readings remained unchanged |
 | Documentation UI | Real captures from the existing `loop` simulator, using empty setup fields and an isolated account |
 
@@ -327,7 +327,9 @@ The two synthetic CGM points are retained only in the isolated test account beca
 
 The [simulator validation record](.log/261029-1538-simulator-end-to-end-validation.md) gives the actual workflow and failure-test results. The carb cycle reused one Glooko food GUID through 27 g → 34 g → deletion; all 227 pre-existing insulin records and 14 pre-existing food records remained unchanged.
 
-The [phone deployment record](.log/261029-1635-ultimate-iphone-deployment.md) covers installation of the current request identity and status fix on **29 October 2026**. The on-phone read-only check matched all 20 existing confirmed insulin entries. Reporting history, the real pump identity, insulin selection and reported therapy schedules/limits were preserved. The check verified existing records; new submissions continue on the normal upload cadence.
+The [earlier phone deployment record](.log/261029-1635-ultimate-iphone-deployment.md) covers installation of the honest request identity and status fix on **29 October 2026**. The on-phone read-only check matched all 20 existing confirmed insulin entries. Reporting history, the real pump identity, insulin selection and reported therapy schedules/limits were preserved. The check verified existing records; new submissions continue on the normal upload cadence.
+
+The [glucose deployment record](.log/261029-1809-glucose-on-ultimate-iphone.md) covers the restored uploader installed at **18:05 GMT on 29 October 2026**. The default-on switch was visible in the phone’s Glucose section. At **18:07:39 GMT**, a fresh read-only check matched **91 glucose readings in both stored records and graphs**, with **0 duplicate minutes**, and **21 insulin entries**, with **0 missing or different**. No glucose was pending. All previously tracked insulin entries, the reporting start, reported therapy settings, pump identity, insulin selection and time zone were preserved. These were the phone’s real sensor readings; no synthetic point was introduced.
 
 Tests of catalogue-associated rapid-acting insulin demonstrated unwanted basal-to-bolus reclassification. Text-only names with a null medication reference preserved both delivery kinds in raw records, graphs and the tested statistics.
 
