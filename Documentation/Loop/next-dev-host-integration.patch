@@ -1,9 +1,9 @@
 --- a/Loop/Managers/LoopAppManager.swift
 +++ b/Loop/Managers/LoopAppManager.swift
 @@ -435,10 +435,12 @@
- 
+
          loopDataManager.deliveryDelegate = deviceDataManager
- 
+
 -        deviceDataManager.instantiateDeviceManagers()
 -
          settingsManager.deviceStatusProvider = deviceDataManager
@@ -12,9 +12,9 @@
 +        deviceDataManager.instantiateDeviceManagers()
 +        // Publish the restored devices and insulin type, replacing any snapshot made before they were ready.
 +        settingsManager.storeSettings()
- 
+
          SharedLogging.instance = loggingServicesManager
- 
+
 --- a/Loop/Managers/RemoteDataServicesManager.swift
 +++ b/Loop/Managers/RemoteDataServicesManager.swift
 @@ -70,6 +70,7 @@
@@ -23,5 +23,5 @@
          }
 +        uploadExistingData(to: remoteDataService)
      }
- 
+
      func removeService(_ remoteDataService: RemoteDataService) {
