@@ -11,12 +11,14 @@ struct ReportingContext: Codable, Equatable {
     var timeZoneIdentifier: String
     var settings: IBFPumpSettings?
     var problem: String?
+    var insulinName: String?
 
     var timeZone: TimeZone { TimeZone(identifier: timeZoneIdentifier) ?? .current }
     var isRealPump: Bool { sourceID != nil }
 
     init(_ stored: StoredSettings) {
         date = stored.date
+        insulinName = stored.insulinType?.brandName
         timeZoneIdentifier = stored.basalRateSchedule?.timeZone.identifier ?? stored.controllerTimeZone.identifier
         let device = stored.pumpDevice
         sourceName = device?.model ?? device?.name ?? "No pump connected"
@@ -77,7 +79,7 @@ struct ReportingContext: Codable, Equatable {
 
     func hasSameConfiguration(as other: ReportingContext) -> Bool {
         sourceID == other.sourceID && sourceName == other.sourceName && settings == other.settings &&
-        timeZoneIdentifier == other.timeZoneIdentifier && problem == other.problem
+        timeZoneIdentifier == other.timeZoneIdentifier && problem == other.problem && insulinName == other.insulinName
     }
 }
 
@@ -90,13 +92,13 @@ extension DoseEntry {
         case .basal, .tempBasal:
             return SourceDose(id: id, kind: type == .basal ? .basal : .tempBasal, start: startDate, end: endDate,
                               rate: unitsPerHour, delivered: isMutable ? nil : unitsInDeliverableIncrements,
-                              automatic: automatic, isMutable: isMutable)
+                              automatic: automatic, isMutable: isMutable, insulinName: insulinType?.brandName)
         case .suspend:
             return SourceDose(id: id, kind: .suspend, start: startDate, end: endDate, isMutable: isMutable)
         case .resume: return nil
         case .bolus:
             return SourceDose(id: id, kind: .bolus, start: startDate, end: endDate, programmed: programmedUnits,
-                              delivered: deliveredUnits, automatic: automatic, isMutable: isMutable)
+                              delivered: deliveredUnits, automatic: automatic, isMutable: isMutable, insulinName: insulinType?.brandName)
         }
     }
 }

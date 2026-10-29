@@ -150,7 +150,7 @@ struct SignInView: View {
                 Toggle("Remember password for session recovery", isOn: $model.rememberPassword).disabled(model.busy)
                     .accessibilityIdentifier("glooko-remember-password")
             }
-            Section(header: Text("Uploads"), footer: Text("Insulin is sent as delivered basal and bolus entries with no medication named. Carb food entries are independent. This service does not upload glucose.")) {
+            Section(header: Text("Uploads"), footer: Text("Insulin entries show the insulin name recorded by Loop followed by ‘via Loop’. Older doses with no saved insulin name show ‘Insulin via Loop’. Carb food entries are independent. This service does not upload glucose.")) {
                 Toggle("Upload insulin", isOn: $model.insulinEnabled).disabled(model.busy)
                 Toggle("Allow cellular data", isOn: $model.allowCellular).disabled(model.busy)
             }
@@ -269,7 +269,7 @@ struct StatusView: View {
                     Text("2 hours").tag(TimeInterval(7200)); Text("4 hours").tag(TimeInterval(14400))
                 }
             }
-            Section(header: Text("Upload routes"), footer: Text("Insulin is sent as Glooko basal and bolus entries with no medication named. Local queued insulin is retained when its upload is disabled. Carb foods are independent. Glucose is not uploaded by this service. Wi-Fi-only requests wait for Wi-Fi.")) {
+            Section(header: Text("Upload routes"), footer: Text("Basal and bolus entries show the insulin name recorded by Loop followed by ‘via Loop’. Older doses with no saved insulin name show ‘Insulin via Loop’. Local queued insulin is retained when its upload is disabled. Carb foods are independent. Glucose is not uploaded by this service. Wi-Fi-only requests wait for Wi-Fi.")) {
                 Toggle("Upload insulin", isOn: Binding(get: { model.options.insulinEnabled }, set: { model.configure(insulin: $0) })).accessibilityIdentifier("glooko-insulin-enabled")
                 Toggle("Allow cellular data", isOn: Binding(get: { model.options.allowCellular }, set: { model.configure(cellular: $0) }))
             }
