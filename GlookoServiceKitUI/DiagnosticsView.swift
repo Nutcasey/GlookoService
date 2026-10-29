@@ -43,7 +43,7 @@ struct DiagnosticsView: View {
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     init(service: GlookoService, build: String) { _model = StateObject(wrappedValue: DiagnosticsModel(service: service)); self.build = build }
     private func time(_ value: Date?) -> String {
-        guard let value else { return "Not recorded" }
+        guard let value else { return "Not yet" }
         let f = DateFormatter(); f.locale = Locale(identifier: "en_GB"); f.dateFormat = "d MMM HH:mm:ss"
         return f.string(from: value)
     }
@@ -53,52 +53,61 @@ struct DiagnosticsView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section(footer: Text("This fetches Glooko's stored insulin and acknowledged glucose again. It does not send data or prove which screen the Glooko app is displaying.")) {
+                Section(footer: Text("Reads back what Glooko has stored and compares it with what Loop sent. It doesn't send or change anything.")) {
                     Button(model.checking || model.data.checking ? "Checking Glooko…" : "Check Glooko now") { model.check() }
                         .disabled(model.checking || model.data.checking).accessibilityIdentifier("glooko-live-check")
                     if let report = model.data.state.lastInspection {
                         row("Last check", time(report.checkedAt))
-                        Text(report.insulinVerified ? "Every confirmed insulin entry matched Glooko at the last check." : "Some insulin entries need review. See the counts below.")
-                            .foregroundColor(report.insulinVerified ? .primary : .orange).accessibilityIdentifier("glooko-live-check-result")
+                        Group {
+                            if report.insulinVerified { Label { Text("All insulin sent by Loop matches Glooko.") } icon: { Image(systemName: "checkmark.circle.fill").foregroundColor(.green) } }
+                            else { GlookoWarning(text: "Some insulin entries don't match Glooko. See Insulin below.") }
+                        }.accessibilityIdentifier("glooko-live-check-result")
                     }
                     if let error = model.data.state.inspectionError {
-                        Text("The latest check failed. Any counts shown are from the previous completed check.").foregroundColor(.orange)
-                        Text(error).foregroundColor(.red)
+                        GlookoWarning(text: "The last check failed, so the results below are from the check before it. \(error)")
                     }
                 }
-                Section(header: Text("Insulin and queues"), footer: Text("Boluses are sent 10 minutes after they finish and basal hours 15 minutes after the hour ends. Automatic uploads run at 15-minute intervals; Upload now sends immediately.")) {
-                    row("Last dose callback", time(model.data.state.lastDoseCallback))
-                    row("Latest source dose", time(model.data.latestSourceDose))
-                    row("Last settings callback", time(model.data.state.lastSettingsCallback))
-                    row("Dose query finished", model.data.doseQueryDrained ? "Yes" : "No")
-                    row("Settings query finished", model.data.settingsQueryDrained ? "Yes" : "No")
-                    row("Insulin entries waiting", String(model.data.pendingDoses))
-                    row("Carbs awaiting confirmation", String(model.data.pendingCarbs))
-                    row("Glucose query finished", model.data.glucoseQueryDrained ? "Yes" : "No")
-                    row("Glucose awaiting confirmation", String(model.data.pendingGlucose))
-                    row("Last glucose callback", time(model.data.state.lastGlucoseCallback))
-                    row("Last glucose confirmation", time(model.snapshot.status.lastGlucoseConfirmedAt))
-                    row("Last carb confirmation", time(model.snapshot.status.lastCarbConfirmedAt))
+                Section(header: Text("Insulin"), footer: Text("Boluses are sent 10 minutes after they finish and basal 15 minutes after each hour ends.")) {
+                    row("Latest dose in Loop", time(model.data.latestSourceDose))
+                    row("Last received from Loop", time(model.data.state.lastDoseCallback))
+                    row("Loop history loaded", model.data.doseQueryDrained ? "Yes" : "No")
                     row("Basal ready through", time(model.snapshot.summary.committedThrough))
-                    row("Last insulin sent", time(model.snapshot.status.lastUploadAt))
-                    row("Last insulin confirmation", time(model.snapshot.status.lastConfirmedAt))
+                    row("Last sent", time(model.snapshot.status.lastUploadAt))
+                    row("Last confirmed", time(model.snapshot.status.lastConfirmedAt))
+                    row("Waiting to send", String(model.data.pendingDoses))
                     if let report = model.data.state.lastInspection {
-                        row("Insulin entries matched", String(report.insulinMatched))
-                        row("Missing / different", "\(report.insulinMissing) / \(report.insulinMismatched)")
-                        if let glucose = report.glucose {
-                            row("Glucose expected", String(glucose.expected))
-                            row("Glucose stored / graphed", "\(glucose.matchedStored) / \(glucose.matchedGraphed)")
-                            row("Glucose duplicate minutes", String(glucose.duplicates))
-                        }
+                        row("Matched in Glooko", String(report.insulinMatched))
+                        row("Missing in Glooko", String(report.insulinMissing))
+                        row("Different in Glooko", String(report.insulinMismatched))
                     }
-                    ForEach([model.snapshot.status.lastError, model.snapshot.status.carbError, model.snapshot.status.glucoseError].compactMap { $0 }, id: \.self) { Text($0).foregroundColor(.red) }
+                    if let error = model.snapshot.status.lastError { GlookoWarning(text: error) }
+                }
+                Section(header: Text("Glucose")) {
+                    row("Last received from Loop", time(model.data.state.lastGlucoseCallback))
+                    row("Loop history loaded", model.data.glucoseQueryDrained ? "Yes" : "No")
+                    row("Last confirmed", time(model.snapshot.status.lastGlucoseConfirmedAt))
+                    row("Waiting to confirm", String(model.data.pendingGlucose))
+                    if let glucose = model.data.state.lastInspection?.glucose {
+                        row("Expected in Glooko", String(glucose.expected))
+                        row("Stored in Glooko", String(glucose.matchedStored))
+                        row("Shown on Glooko graphs", String(glucose.matchedGraphed))
+                        row("Duplicate minutes", String(glucose.duplicates))
+                    }
+                    if let error = model.snapshot.status.glucoseError { GlookoWarning(text: error) }
+                }
+                Section(header: Text("Carbs and settings")) {
+                    row("Last carb confirmed", time(model.snapshot.status.lastCarbConfirmedAt))
+                    row("Carbs waiting to confirm", String(model.data.pendingCarbs))
+                    row("Last settings from Loop", time(model.data.state.lastSettingsCallback))
+                    row("Settings history loaded", model.data.settingsQueryDrained ? "Yes" : "No")
+                    if let error = model.snapshot.status.carbError { GlookoWarning(text: error) }
                 }
                 Section(header: Text("Finding data in Glooko")) {
-                    Text("Open Daily log for dose and food entries. Glucose sent by Loop uses the LibreView CSV importer and appears as Abbott/CSV data in Glooko.")
-                    if let report = model.data.state.lastInspection { ForEach(report.reportWarnings, id: \.self) { Text($0).foregroundColor(.orange) } }
+                    Text("Open the Daily log for insulin and food entries. Glucose appears as Abbott/CSV data.")
+                    if let report = model.data.state.lastInspection { ForEach(report.reportWarnings, id: \.self) { GlookoWarning(text: $0) } }
                 }
-                Section(header: Text("Recent activity"), footer: Text("The last 250 events are retained for up to 48 hours in this account's protected storage. Requests record the route, result, duration and byte counts; headers, query parameters and bodies are excluded.")) {
-                    if let error = model.data.storageError { Text(error).foregroundColor(.red) }
+                Section(header: Text("Recent activity"), footer: Text("Keeps the last 250 events for up to 48 hours. Requests record only the address, result, time taken and size, never their contents.")) {
+                    if let error = model.data.storageError { GlookoWarning(text: error) }
                     if model.data.state.events.isEmpty { Text("Activity will appear as Loop receives data or contacts Glooko.").foregroundColor(.secondary) }
                     ForEach(model.data.state.events.reversed()) { event in
                         VStack(alignment: .leading, spacing: 4) {
@@ -107,7 +116,7 @@ struct DiagnosticsView: View {
                         }
                     }
                 }
-                Section(footer: Text("The shared report contains health-data timings, counts and errors. Review it before sharing.")) {
+                Section(footer: Text("The shared report includes health-data times, counts and errors. Check it before you share it.")) {
                     Text(build).font(.caption).foregroundColor(.secondary)
                 }
             }
