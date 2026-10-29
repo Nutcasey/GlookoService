@@ -28,9 +28,7 @@ public final class GlookoClient: @unchecked Sendable {
         set { lock.lock(); defer { lock.unlock() }; traceObserver = newValue }
     }
     private let session: URLSession
-    private let deviceInformation: String
-
-    public init(region: Region = .eu, sessionCookie: String? = nil, deviceId: String = UUID().uuidString, configuration: URLSessionConfiguration = .ephemeral) {
+    public init(region: Region = .eu, sessionCookie: String? = nil, configuration: URLSessionConfiguration = .ephemeral) {
         self.region = region
         self.cookie = sessionCookie
         let config = configuration
@@ -38,14 +36,6 @@ public final class GlookoClient: @unchecked Sendable {
         config.httpShouldSetCookies = false
         config.timeoutIntervalForRequest = 30
         session = URLSession(configuration: config)
-        let info: [String: String] = [
-            "applicationType": "logbook", "os": "ios", "osVersion": "27.0.1", "device": "iPhone",
-            "deviceModel": "iPhone", "deviceManufacturer": "Apple", "serialNumber": String(deviceId.prefix(12)),
-            "deviceId": deviceId, "applicationVersion": "6.17.2", "buildNumber": "37791",
-            "gitHash": "ab48de20", "clinicalResearch": "false",
-            "extractionInterface": ProcessInfo.processInfo.environment["GLOOKO_EXTRACTION"] ?? "; foreground",
-        ]
-        deviceInformation = String(decoding: try! JSONSerialization.data(withJSONObject: info, options: [.sortedKeys]), as: UTF8.self)
     }
 
     /// Cookie names, value lengths and response keys from the last sign-in attempt; never values.
@@ -66,12 +56,10 @@ public final class GlookoClient: @unchecked Sendable {
     @discardableResult
     public func signIn(email: String, password: String) async throws -> String {
         var failures: [String] = []
-        let device = try JSONSerialization.jsonObject(with: Data(deviceInformation.utf8))
         // v2 takes `userLogin` (app shape); v3 takes `user` (nightscout-connect after Glooko's 2025 change).
         let attempts: [(String, [String: Any])] = [
-            ("/api/v3/users/sign_in", ["user": ["email": email, "password": password], "deviceInformation": device]),
             ("/api/v3/users/sign_in", ["user": ["email": email, "password": password]]),
-            ("/api/v2/users/sign_in", ["userLogin": ["email": email, "password": password], "deviceInformation": device]),
+            ("/api/v2/users/sign_in", ["userLogin": ["email": email, "password": password]]),
         ]
         for host in region.signInHosts {
             for (path, body) in attempts {
@@ -131,9 +119,8 @@ public final class GlookoClient: @unchecked Sendable {
         req.httpBody = body
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.setValue(deviceInformation, forHTTPHeaderField: "deviceInformation")
         req.setValue("en-GB", forHTTPHeaderField: "glookoOverrideLocale")
-        req.setValue("Glooko/37791 CFNetwork/1.0 Darwin/27.0.0 GlookoiOS/6.17.2", forHTTPHeaderField: "User-Agent")
+        req.setValue("Loop-GlookoService (+https://github.com/Nutcasey/GlookoService)", forHTTPHeaderField: "User-Agent")
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
         if authenticated {
             guard let cookie = sessionCookie else { throw GlookoError.notSignedIn }

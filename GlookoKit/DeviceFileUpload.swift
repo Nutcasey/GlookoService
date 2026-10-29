@@ -7,9 +7,7 @@ public extension GlookoClient {
         return try await send("POST", host: region.dataHost,
                               path: "/api/v3/device/file/upload?extractorName=InsuletOmnipod",
                               body: data, authenticated: true,
-                              headers: ["Content-Type": "application/octet-stream",
-                                        "Origin": "https://eu.my.glooko.com",
-                                        "Referer": "https://eu.my.glooko.com/"])
+                              headers: ["Content-Type": "application/octet-stream"])
     }
 
     /// Verify the server's account identity before a probe mutation. A Keychain profile is only a label.
