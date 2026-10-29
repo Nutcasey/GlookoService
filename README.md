@@ -297,8 +297,11 @@ Verification recorded on **29 October 2026**:
 | Core | 40 passing tests; request identity, labels, original quantities, persistence and old-cache upgrades |
 | iOS service | 11 passing integration tests; per-dose insulin, historical settings, authentication, cancellation, retries and source draining |
 | Isolated live API | Production uploader added names to existing GUIDs, replayed without duplicates, corrected a synthetic name and verified cleanup |
-| Device integration | Signed installation, restored real-pump/insulin context and authenticated readback |
+| Simulator workflow | Fresh sign-in, cancellation, alerts, carb creation/edit/deletion, repeated Upload now, restart recovery and simulator-insulin exclusion |
+| Device integration | Earlier phone build: signed installation, restored real-pump/insulin context and authenticated readback |
 | Documentation UI | Real captures from the existing `loop` simulator, using empty setup fields and an isolated account |
+
+The [simulator validation record](.log/261029-1538-simulator-end-to-end-validation.md) gives the actual workflow and failure-test results. The carb cycle reused one Glooko food GUID through 27 g → 34 g → deletion; all 227 pre-existing insulin records and 14 pre-existing food records remained unchanged. The current request identity was tested in the simulator; the physical-phone check above predates that change.
 
 Tests of catalogue-associated rapid-acting insulin demonstrated unwanted basal-to-bolus reclassification. Text-only names with a null medication reference preserved both delivery kinds in raw records, graphs and the tested statistics.
 

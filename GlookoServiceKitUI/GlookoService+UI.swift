@@ -282,7 +282,9 @@ struct StatusView: View {
                 row("Entries confirmed", String(model.snapshot.summary.records)).accessibilityIdentifier("glooko-insulin-confirmed")
                 row("Reporting from", text(model.snapshot.summary.historyStart))
                 if let detail = model.snapshot.status.verificationDetail { Text(detail).foregroundColor(.secondary).accessibilityIdentifier("glooko-insulin-detail") }
-                if let error = model.snapshot.status.lastError { Text(error).foregroundColor(.red).accessibilityIdentifier("glooko-error") }
+                if model.options.insulinEnabled, let error = model.snapshot.status.lastError {
+                    Text(error).foregroundColor(.red).accessibilityIdentifier("glooko-error")
+                }
                 Button(model.uploading ? "Uploading…" : "Upload now") { model.uploadNow() }
                     .disabled(model.uploading).accessibilityIdentifier("glooko-upload-now")
             }
