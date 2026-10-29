@@ -1,112 +1,299 @@
-# GlookoService: Loop → Glooko pump history
+# GlookoService — Loop → Glooko
 
-A reporting-only Loop service. It sends reconciled pump delivery through a **virtual Omnipod Eros reporting device** and carb entries as Glooko foods. It does not upload glucose. It never doses, changes Loop therapy or acts on remote commands.
+GlookoService is a reporting plugin for Loop. It sends **delivered pump insulin** and **carbohydrate entries** to an EU-hosted Glooko account.
 
-The insulin importer is a compatibility route, not a native Loop integration. New installations leave insulin reporting off until the user chooses it; carb foods remain independent. Existing installations retain their insulin, password-recovery and cellular settings on upgrade. Any real pump which supplies complete Loop delivery/settings context can use the insulin adapter, but Glooko still assigns the virtual Insulet identity. A generic faithfully attributed pump write API has not yet been integrated.
+**Use `main` from this repository with Loop and LoopKit `next-dev`.** The async next-dev integration and insulin-name support are part of `main`.
 
-Glucose upload was removed on 27 October 2026. There is no glucose sender, CSV importer, glucose upload setting or glucose subscription in this service. Old saved flags cannot enable it. Upgrade removes this plugin's retired glucose cache, retaining Loop's original glucose store. Use a separate supported CGM-to-Glooko connection for glucose. Historical records already imported into Glooko are not erased by removing an uploader.
+The service does not deliver insulin, change therapy settings, accept remote treatment commands or upload glucose. It uses Glooko’s patient-app session API; it is an unofficial integration, not Glooko’s official uploader.
 
-## How it works
+## Contents
 
-- Loop's created/deleted doses are durably staged before the source callback succeeds. Commitment waits for the dose and settings queries to finish; a page boundary is not a complete clinical snapshot.
-- History settles for one hour and stops before unresolved mutable doses or a bolus whose end has not settled. Commit boundaries use whole native seconds after all source caps, preserving fractional remainders for the next window. Manual **Upload now** also commits everything ready at that boundary.
-- Actual basal delivered volume is retained separately from programmed rate. The encoder uses adjacent native hundredth-unit rates where necessary to preserve volume, rather than rounding away insulin. Genuine gaps are suspensions. Temporary rates cannot expire before the next actual boundary.
-- The account is verified before each submission. History and Keychain credentials are partitioned by the patient GUID. Reconnecting the same account resumes its identity and indices; another account receives its own history.
-- An upgrade migrates the original history without changing its serial or record indices and retains a legacy backup. Read/decode errors pause uploads instead of creating an empty replacement.
-- Schema 4 retains original submitted records and exports inert download markers for the old zero-second suspend/resume bug. Before resending, it corrects affected zero-rate scheduled basals by their existing Glooko GUID, or removes a duplicate zero-rate artefact when the correct row already exists. Every write has a durable before-image and requires readback; unrelated non-zero discrepancies stop recovery.
-- Verification defers the interval ending at an in-progress basal until later history finalises that boundary. Wrong values, duplicate rows and missing final records are reported separately. Deferred recent intervals do not freeze confirmation of the final history.
-- File acknowledgement and the verified native prefix are persisted separately, so retention cannot prune an interval that still awaits finalisation. Fresh ingestion receives bounded readback retries without resubmitting the file.
-- Carbs entered in Loop are sent soon after saving as standalone Glooko foods (listed as "Food"), outside the pump file. Each Loop entry keeps fixed Glooko IDs, so edits update and deletions remove the same entry, and each is confirmed by reading it back.
-- Carb identities include their source app. Confirmation covers the complete entry, including edits without a source version. Legacy entries retain their existing remote GUIDs when replayed source history establishes their owner; ambiguous ownership pauses the callback instead of overwriting another entry. Unreadable, corrupt or missing acknowledged carb storage also pauses callbacks and preserves the original file.
-- The carb sender drains edits received during a request, retries failures with bounded backoff and is cancelled on service deletion. **Upload now** retries carbs even when pump reporting is paused. Readback follows recent update time, rather than scanning the account's entire food history after every entry.
-- Settings come from Loop's saved therapy configuration, including basal programme, carb ratios, sensitivity, target range, safety threshold, maximum doses and insulin action duration. Missing settings block submission. The IBF envelope retains the accepted Eros hardware descriptors for the virtual reporting device; these do not describe the attached pump's hardware.
-- Stored pump context identifies the selected real source. Simulator/unknown sources, source changes and intervals spanning source changes pause reporting for review. A timestamp alone does not authorise a source.
-- Routine insulin files include yesterday, today and every unconfirmed day, starting only at a real midnight delivery boundary with consistent clock context. Initial uploads, backlogs and unsafe clock/boundary cases use the retained-file fallback. Local 14-day retention remains separate from the posted window. This avoids reposting the whole retained fortnight during normal operation without risking partial-day summaries. Readback checks the submitted window; manual diagnostics still check retained history.
-- New installations default to Wi-Fi-only requests; users can enable cellular explicitly. Low Data Mode requests are disabled. Existing installations retain their previous cellular behaviour.
-- At most every 15 minutes the file is submitted to `POST https://eu.api.glooko.com/api/v3/device/file/upload?extractorName=InsuletOmnipod`. Authentication redirects are not followed. Session recovery includes HTTP 421 and verifies the patient again.
-- **Submission and confirmation are separate.** A source-specific readback checks each eligible final basal, suspension and bolus record, including its quantity/duration. Missing/incomplete readback leaves the file pending. Running intervals are not claimed as confirmed coverage.
-- Unconfirmed records are never pruned. Confirmed history is retained for at least 14 days, with its delivery anchor. Indices remain stable across retries and relaunches.
+- [What it sends](#what-it-sends)
+- [Build and install](#build-and-install)
+- [Connect your account](#connect-your-account)
+- [How uploads work](#how-uploads-work)
+- [Insulin names and Loop attribution](#insulin-names-and-loop-attribution)
+- [When data appears](#when-data-appears)
+- [Find and verify your data](#find-and-verify-your-data)
+- [Troubleshooting](#troubleshooting)
+- [Credentials, privacy and removal](#credentials-privacy-and-removal)
+- [Limits and historical uploads](#limits-and-historical-uploads)
+- [Developer reference](#developer-reference)
+- [Verification](#verification)
 
-## Corrections and recovery
+## What it sends
 
-Backfilled, changed or deleted doses can rebuild the unsubmitted tail while preserving the submitted prefix. A persisted submission checkpoint identifies which source doses and boundary may have reached Glooko. Source changes are reconciled again after authentication, immediately before recording submission intent. Once indices may have reached Glooko, this integration has no verified remote amendment/deletion contract. Those changes are retained as explicit conflicts and uploads pause; they are never silently acknowledged as corrected. A correction which returns to the original submitted value resolves its conflict. Late-dose counts use distinct source identities.
+| Loop data | What Glooko receives | What is left out |
+|---|---|---|
+| Finished pump bolus | One delivered bolus entry, using delivered units when available | Automatic/manual pump-bolus distinction, recommendation details and the original programmed amount |
+| Basal and temporary basal delivery | Delivered units aggregated into each clock hour | Basal-rate profiles, temporary-basal intervals, suspension/resumption events and zero-delivery hours |
+| Carb entry | A standalone food entry containing grams and its timestamp | Meal classification, food description, absorption time and other nutritional information |
+| Insulin selection | A text name such as `Fiasp via Loop`, attached to the corresponding delivery | A structured association with Glooko’s medication catalogue |
+| Glucose / CGM data | Nothing | All glucose uploads; use a separate supported CGM connection |
+| Therapy settings and pump status | Local context for identifying the source, timing and insulin selection | Uploading settings or registering a new pump in Glooko |
 
-History schema 3 stores source dates losslessly and reads older ISO date formats. Existing identities and indices survive migration. Older builds cannot read the new schema. Loop's host must query restored services on launch, retaining its existing stream anchors, so the service receives fresh dose and settings drain boundaries even without a new settings change.
+Manually entered insulin doses in Loop are excluded. The pump simulator and sources without an identifiable real pump are excluded from insulin reporting. Carb uploads remain independent of pump eligibility.
 
-The standalone host change is [LoopKit/Loop PR #2620](https://github.com/LoopKit/Loop/pull/2620). The [self-contained integration patch and instructions](Documentation/Loop/README.md), based on Loop `7bb17492`, are also included in this public repository. No private checkout is required.
+## Build and install
 
-The plugin never deletes or rewrites Loop’s private `RemoteDataServicesManager` query-anchor keys. Normal host add/restore queries own source replay. Very old installations which require legacy carb ownership replay show an explicit migration warning: remove and re-add the service **keeping local history** so Loop supplies its retained cache. This cannot recover source history Loop no longer retains.
+This repository builds a plugin, not a standalone iPhone app. It must be included in a compatible Loop workspace.
 
-The status screen updates as work progresses and shows last submission, last confirmation, confirmed coverage and conflicts. An old mutable marker remains visible with a recovery explanation instead of disappearing or silently holding the queue forever.
+Requirements:
 
-Report checks run after confirmed pump ingestion and compare Glooko's Summary with its stored per-device summaries. Device-transition discrepancies, missing automatic labels and a zero current-day summary remain visible separately from successful record ingestion. Carb-only foods are visible in Graphs/History; the website's Diet panel may remain empty for them.
+- Loop, LoopKit and their dependencies from a matching **next-dev** workspace.
+- An EU-hosted Glooko account. There is no region selector; other regions and two-factor sign-in are not implemented.
+- A real pump that Loop can identify for insulin reporting. A simulator is sufficient for the UI and carb workflow.
+- The plugin’s Xcode targets require iOS **17.6 or later**. The documented build was exercised with Xcode **27.1**.
 
-The status screen identifies the GlookoService build by its short commit hash, appending `.dirty` for uncommitted changes, followed by its build date and time. The UI framework captures these values during its build, following Glasshouse's commit/dirty convention. Builds outside a GlookoService Git checkout show `unknown` rather than another repository's hash.
+Start with [Loop’s Mac/Xcode build instructions](https://loopkit.github.io/loopdocs/build/overview/) for signing and device setup. Then follow the [workspace and host integration guide](Documentation/Loop/README.md).
 
-Reconnect to the pump to resolve provisional data first. If a source change or unresolved old history requires a new period, the explicit **Start a new reporting period** action archives the old history and begins from now. It does not amend existing Glooko records. Removal offers **Disconnect and keep history** or a separately confirmed **Erase local data and remove**. Both stop/cancel all owned work and remove the current account’s credentials. Erasure also removes all of this plugin’s account-scoped pump and carb history, archives, legacy backups, diagnostics and associated credentials from this app. It leaves Loop’s original source stores and Glooko’s remote records intact. Deletion errors stay visible so removal can be retried.
+A typical directory layout is:
 
-## Authentication and Loop alerts
+```text
+Loop development/
+├── LoopWorkspace/
+│   ├── LoopWorkspace.xcworkspace
+│   ├── Loop/
+│   ├── LoopKit/
+│   └── …
+└── GlookoService/
+    └── GlookoService.xcodeproj
+```
 
-Glooko documents [OAuth 2 with PKCE and refresh tokens](https://developers.glooko.com/docs/oauth/configuration/authorization). It requires a client ID and redirect URI registered by Glooko; dynamic registration is unavailable. This repository has no registered Loop client and does **not** claim to use OAuth. Its compatibility login uses the existing patient-app session cookie.
+Add `GlookoService.xcodeproj` to the workspace and `GlookoServiceKitPlugin` to the **LoopWorkspace** scheme’s Build action. Build that workspace scheme so the matching LoopKit products and plugin are built together.
 
-New sign-ins save the session only. **Remember password for session recovery** is optional and explains that the app can retrieve and replay the password. Session and optional password use `AfterFirstUnlockThisDeviceOnly`, with no iCloud synchronisation or migration to another device. Existing users retain password recovery until they choose **Forget stored password** or change sign-in settings. Account identity is checked before submissions. Concurrent senders share one authentication operation; automatic password attempts are rate-limited. Rejection/restriction statuses (401, 403, 423, 429), MFA and an unavailable recovery secret stop automatic replay and require interactive sign-in. Temporary network errors remain retryable. Raw sign-in bodies, passwords, cookies and transport descriptions are excluded from error output and diagnostics.
+The host must query restored services and publish device metadata after restoring its device managers. The integration guide includes a patch for those next-dev requirements. Its older `dev` patch is historical and is not the current installation path.
 
-The service issues real Loop alerts, with immediate foreground and background content, for authentication requiring attention, history paused for review, eligible submissions overdue, and accepted submissions still unconfirmed. The default delay is one hour, configurable in settings; the clinical one-hour settling window is excluded. Empty or intentionally disabled streams do not produce overdue alerts. Stable IDs deduplicate alerts across relaunches and retract resolved conditions. **Send test alert** exercises the real Loop alert path. Evaluation runs on source/request activity and a 60-second owned wake-up while the host can execute; iOS suspension limits remain and Loop’s own not-running alerts still matter. Password changes/account closure are detected when Glooko rejects or no longer verifies the session, not instantly while a cookie remains valid.
+After installation, **Glooko** should appear under Loop **Settings → Add Service**. If it is absent, check the workspace, scheme and embedded plugin before trying to sign in.
 
-Enabling native Loop identity and OAuth requires Glooko to register Loop, issue application credentials/redirect metadata, and confirm a supported write contract for pump basals, boluses, settings and source identity. This cannot be enabled by changing a manufacturer string or borrowing another application’s credentials.
+## Connect your account
 
-## Layout and build
+1. Open **Settings → Add Service → Glooko** in Loop.
+2. Enter the credentials for your EU Glooko account.
+3. Choose whether to enable **Upload insulin**. It defaults to **off** for a new installation; carb foods are independent.
+4. Choose **Allow cellular data** if wanted. New installations default to Wi-Fi-only requests and do not use constrained/Low Data Mode networks.
+5. Decide whether to enable **Remember password for session recovery**. Without it, the service saves the session and asks you to sign in again when recovery is needed.
+6. Choose **Send history from**. It defaults to now and allows up to seven days back, subject to the history Loop still holds.
+7. Tap **Sign in**. Open the saved service to see its status, queues and diagnostics.
 
-| Path | Contents |
+Reconnecting an account with retained local history resumes its existing reporting period. A new date selection does not silently discard that saved history or start it over.
+
+<table>
+<tr><th>Account setup</th><th>Upload and history choices</th></tr>
+<tr>
+<td><img src="Documentation/Screenshots/setup.png" width="330" alt="Glooko setup inside Loop, with empty account fields and session-recovery choices"></td>
+<td><img src="Documentation/Screenshots/setup-options.png" width="330" alt="Glooko upload switches, history start and sign-in controls"></td>
+</tr>
+</table>
+
+*Actual captures from the existing iPhone 18 Pro simulator. Account fields are empty in these setup images. Outer Loop navigation can differ between builds.*
+
+## How uploads work
+
+```mermaid
+flowchart LR
+    A["Loop doses + settings"] --> B["Saved insulin queue"]
+    C["Loop carb changes"] --> D["Saved carb queue"]
+    B --> E["Account-bound Glooko session"]
+    D --> E
+    E --> F["Glooko insulin + food entries"]
+    F --> G["Read back exact records"]
+    G --> B
+    G --> D
+```
+
+The service saves incoming source changes before acknowledging them to Loop. Insulin preparation waits for **both** the dose and settings queries to finish. A page containing data is not treated as a finished query.
+
+Finished boluses become individual records. Basal delivery is integrated into clock-hour quantities, using measured delivered volume when available. A running or mutable delivery can hold back an unfinished hour.
+
+The local queues retain responsibility until Glooko returns the expected records. An accepted HTTP request alone is not confirmation. Readback checks each insulin record’s identity, amount, timestamp, delivery kind, medication/device flags and uploaded name.
+
+Records have stable identifiers. Retrying updates the same record rather than intentionally creating another copy. Changes and deletions from Loop are staged against those identities. If a deleted insulin entry is needed again, it receives a new revision because Glooko does not revive its deleted GUID.
+
+Carbs use their own queue and retry path. Editing a carb entry updates the same food identity; deleting it soft-deletes that food. Failed carb uploads can retry without another source change. **Upload now** also retries carbs when insulin reporting is disabled or blocked.
+
+## Insulin names and Loop attribution
+
+The service uses the insulin recorded on the original dose. If it is missing, it can use the settings snapshot applicable to that delivery time. It does not apply today’s selection to old doses.
+
+| Available source information | Uploaded name |
 |---|---|
-| `GlookoKit/` | LoopKit-free client, production IBF writer, durable history/repository and readback verifier |
-| `GlookoServiceKit/` | Loop service, source/settings context and dose adapter |
-| `GlookoServiceKitUI/` | Cancellable sign-in and live status/recovery screens |
-| `GlookoServiceKitPlugin/` | Plugin principal class and discovery metadata |
-| `Tests/GlookoKitTests/` | Production-file decoder regressions, history/recovery, account migration and accepted synthetic golden files |
-| `Tests/GlookoServiceKitTests/` | Actual iOS adapter, filesystem, Keychain and intercepted URLSession integration regressions |
+| Fiasp | `Fiasp via Loop` |
+| Humalog | `Humalog via Loop` |
+| Novolog | `Novolog via Loop` |
+| Two known insulins contributing to one basal hour | `Fiasp / Humalog via Loop` |
+| Known and unknown contributions in one hour | `Fiasp / unknown insulin via Loop` |
+| No recoverable insulin name | `Insulin via Loop` |
 
-The core builds/tests on macOS with `swift test`. The iOS plugin builds inside LoopWorkspace:
+Names follow Loop’s selection. The service does not guess regional branding or insulin concentration. A settings fallback spanning a drug change remains unknown.
 
-1. Add this repository to LoopWorkspace, for example as a submodule named `GlookoService`.
-2. Add `GlookoService/GlookoService.xcodeproj` to the workspace.
-3. Add `GlookoServiceKitPlugin` to the workspace scheme's build action.
-4. Build/install Loop normally. Loop's `copy-plugins.sh` embeds the plugin and its frameworks.
+The name is **text**, not a Glooko catalogue medication. Catalogue-linked rapid-acting drugs reclassified test basal entries as bolus, so the service deliberately leaves the medication reference empty.
 
-After adding source files, run `xcodegen generate` and include the regenerated project with the change.
+For example, a **synthetic** delivered-basal record contains:
 
-The service-list icon is Glooko's blue-and-white app artwork from its [official App Store listing](https://apps.apple.com/gb/app/glooko-track-diabetes-data/id471942748), bundled locally in the UI framework's asset catalogue.
+```json
+{
+  "name": "Fiasp via Loop",
+  "insulinType": "basal",
+  "medicationGuid": null,
+  "deviceDelivered": 1,
+  "value": 0.73
+}
+```
 
-The status screen identifies the physical pump and uploader together, for example **Omnipod 5 via Loop**, beside Loop's app icon. After clinical ingestion, or when manually checking an existing reporting device, the service saves that label in the virtual pump's `model` and a namespaced Loop marker in `externalId`. It requires one matching native reporting device, preserves its GUID, serial, manufacturer and catalogue reference, refuses another uploader's identifier, and verifies readback. Label errors are reported independently of clinical confirmation. Glooko's website and reports can continue displaying their catalogue name, **Insulet Omnipod System**; this is metadata attribution, not a new Glooko catalogue integration. The bundled Loop icon is unmodified upstream artwork with its notice in `LoopArtwork-LICENSE.txt`.
+The separate external identifier is also namespaced to Loop. Neither field registers an official Loop device in Glooko’s device catalogue. **Omnipod 5 via Loop** on the service’s status page is Loop’s description of the source; it is not a new Glooko device registration.
 
+Glooko controls its own row layout and punctuation. The uploader supplies the name; it does not render or customise Glooko’s Daily log.
 
-Run the `GlookoServiceTests` scheme on an iOS simulator for the service integration suite. Its dedicated application host provides an isolated sandbox and Keychain; every HTTP request is intercepted. Simulator builds need ad hoc signing (`CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual`) so Xcode supplies the host's simulated Keychain entitlements. Disabling signing produces a host without usable Keychain access. Loop's `RemoteDataServicesManagerTests` separately verifies that restoration queries unchanged source streams.
+Older generic entries retained locally are queued for name updates using their existing identifiers, quantities and timestamps. Missing historical names remain unknown. This is not a global rewrite of every older record in the Glooko account.
 
-## Verification and limits
+## When data appears
 
-The repair was exercised with offline history replays, two four-day simulations with interrupted/automatic boluses, suspensions, replacements, resends, persistence and simulated failures, and an independent IBF decoder. All checked complete-day basal/bolus totals matched. The suite now includes unsubmitted-tail/checkpoint migration, exact source replay, carb corruption/provenance/revision and reverse-order readback regressions. The iOS suite covers shared password recovery and rejection, authentication interleavings, cancellation, in-flight edits, manual retry, retry without another source event, and no paused-stream alert while a relaunched service's source streams drain normally. Core authentication tests exercise all six host/body combinations through URLSession, terminal rejections, cancellation, provisional MFA cookies, HTML, expired/missing cookies and secret-free errors. Health tests cover alert timing, persistence, deduplication/retraction and plugin-scoped erasure. The rolling-window regression decodes actual exported files, preserves unconfirmed days and checks the clock-context fallback.
+| Data | Earliest eligibility | Additional conditions |
+|---|---|---|
+| Bolus | 10 minutes after it finishes | It must be final, within the reporting period and from an eligible source |
+| Basal hour | 15 minutes after the hour ends | Delivery evidence must reach the hour end; mutable data can delay it |
+| Carbs | After Loop delivers the saved change | No insulin settling delay; connection and retry state still apply |
 
-A live isolated-account experiment also accepted an overlapping recent-day file while retaining earlier native GUIDs, clinical quantities and all three closed-day insulin totals. The initial complete file was verified before the suffix was submitted.
+Automatic insulin attempts are throttled to a **15-minute interval** and are driven by Loop’s source activity. They are not a guarantee of delivery at an exact wall-clock time. **Upload now** bypasses that throttle, but not source-query completion, settling or mutable-delivery checks.
 
-A revised synthetic file was accepted in the isolated test account and **all 18 eligible final clinical records passed the production readback verifier**. The supplied nondefault maximum doses, insulin duration, carb ratio and sensitivity were also read back from Glooko settings. This establishes the tested file contract; it does not prove every real pump history or clinic report.
+Example: reporting starts at **08:20**, and a bolus finishes at **08:25**. That bolus is eligible from **08:35**. The partial basal hour **08:20–09:00** is eligible from **09:15**, if its delivery evidence is final.
 
-Device-record confirmation and Glooko's overall Summary statistics are separate contracts. On a mixed Omnipod 5/Loop day, the captured per-device summaries and individual Loop records reconcile, but the overall statistics omit the Loop device's quantities. The same result persists in fresh, no-cache and two-day-range reads. Delayed server-side statistics recalculation remains possible; its refresh deadline and source-selection rules have not been established. Do not treat a successful record readback as proof that the dashboard has combined both devices.
+iOS can suspend Loop’s execution. Network availability, Wi-Fi-only settings, authentication and source activity can add delay. Keep Loop operating normally; this plugin does not replace Loop’s own background-operation requirements or not-running alerts.
 
-Remaining format/product limits:
+## Find and verify your data
 
-- Automatic boluses/temps appear as ordinary boluses/temps.
-- Interrupted boluses retain delivered volume but not their original programmed amount in Glooko's decoded records.
-- The previously observed detailed-row discrepancy on clock-change days remains; daily-summary parity was observed in the earlier fixtures. Travel/time-zone reconstruction is limited by source context.
-- Bolus amounts use the format's hundredth-unit precision; therapy profiles use the native profile precision.
-- Two-factor sign-in and regions outside the EU are unsupported.
-- Submitted clinical corrections remain reviewable conflicts until a supported amendment contract is established or the user explicitly archives the period.
+In Glooko, use **Daily log** for insulin and food entries. Carb-only entries are standalone foods; the web Diet panel can remain empty for them. A separate CGM connection is needed for glucose.
 
-## Diagnostics on the phone
+Glooko [distinguishes device-delivered and manually entered insulin](https://support.glooko.com/hc/en-gb/articles/360001739738-How-is-my-insulin-data-displayed-in-the-Glooko-app). These uploads set the device-delivery flag. That does not provide a full pump timeline, a settings report or an official Loop integration.
 
-Open **Settings → Glooko → Diagnostics and live check**. **Check Glooko now** performs fresh authenticated reads of stored pump history. It compares exact values against a captured copy of Loop's local history and reports missing, different and duplicate records. The check does not send clinical data or advance upload acknowledgements. Results are dated, retained across restarts, and remain separate from Glooko's overall Summary warnings.
+In Loop, open **Settings → Glooko**:
 
-The screen also shows dose/settings callback times, query-drain state, pending dose/carb queues, final pump-history cutoff and confirmation dates. Pump history retains its one-hour settling delay and fifteen-minute submission interval.
+- **Last sent** records submission activity.
+- **Last confirmed** records a successful record readback.
+- **Entries waiting** counts prepared entries still needing confirmation. It does not count every unfinished dose that may become eligible later.
+- **Basal ready through** shows the current delivery-evidence and settling horizon. It is not proof of preparation or upload. **Basal confirmed through** records acknowledged hourly coverage.
+- Carb confirmation and waiting counts are shown separately.
 
-The service retains up to 250 activity events for at most 48 hours in protected, account-scoped storage. HTTP traces include method, path without query parameters, status, duration and byte counts. Headers, cookies, passwords and bodies are excluded. Journal failures are visible and do not block clinical uploads; an unreadable journal is preserved rather than overwritten. Use the share button to review/export the diagnostic report. It contains health-data timings, counts and errors.
+<table>
+<tr><th>Upload status and controls</th><th>Independent readback</th></tr>
+<tr>
+<td><img src="Documentation/Screenshots/status.png" width="330" alt="Glooko upload status inside Loop with queues and the Upload now control"></td>
+<td><img src="Documentation/Screenshots/diagnostics.png" width="330" alt="Glooko diagnostics showing the dated live check, source-query completion and queue counts"></td>
+</tr>
+</table>
 
-In the Glooko mobile app, use **Daily log** for dose and food entries. This service does not import or verify CGM readings.
+*These screenshots use a simulator and an isolated test account. Simulator insulin is excluded. A successful check comparing zero confirmed insulin entries is a connection check, not evidence that insulin was uploaded.*
+
+### What Check Glooko now proves
+
+**Diagnostics and live check → Check Glooko now** fetches Glooko’s insulin records again and compares the locally confirmed entries with the server. It does not send insulin, advance acknowledgements or certify the whole Glooko account.
+
+Check the date and counts. “Every confirmed insulin entry matched” with **0 matched** is not evidence of a dose transfer. Nor does a successful record check prove that every Glooko dashboard or clinic report uses the same source-selection rules.
+
+Diagnostics also show source callbacks, query completion, prepared queues, confirmation times and recent request results. The service retains up to **250 events for 48 hours**. Request traces omit headers, query parameters, bodies, passwords and cookies.
+
+The share control exports a diagnostic report. It still contains health-data timings, counts and errors; review it before sharing.
+
+## Troubleshooting
+
+| What you see | Meaning and next step |
+|---|---|
+| Glooko missing from Add Service | Recheck the workspace project, scheme build target and plugin embedding |
+| Signed in, but zero entries | Check the reporting start, settling windows, source-query completion and whether any eligible delivery exists |
+| Pump Simulator / unknown source excluded | Expected insulin guard. Use a real pump for insulin reporting; simulator carbs can still exercise the food route |
+| No pump connected after relaunch | Check the host integration’s restored-device snapshot; do not disguise the source by changing a manufacturer string |
+| Waiting for source history/settings | The host must finish both queries, including their empty drain callbacks; see the host integration guide |
+| Session expired / sign-in needed | Use Sign in again. Optional password recovery cannot handle every account or authentication challenge |
+| Wi-Fi-only and nothing moves | Wait for Wi-Fi or explicitly enable cellular; constrained/Low Data Mode networking remains disabled |
+| Accepted but not confirmed | The queue stays pending. Inspect readback/request results; an HTTP success is insufficient |
+| Food visible but Diet empty | Standalone carb foods can appear in Daily log/Graphs without populating the Diet panel |
+| Older summaries differ | Inspect the date range and older imported sources. This plugin does not certify or repair all historical Glooko aggregates |
+
+### Alerts
+
+The service can issue Loop alerts for authentication needing attention, paused history, overdue eligible submissions and delayed confirmation. The overdue threshold defaults to **one hour**, with choices in the service settings.
+
+Settling and intentionally disabled streams are not themselves overdue uploads. Alerts are deduplicated and resolved alerts are retracted when the condition clears. Their background delivery depends on Loop, iOS and notification permissions.
+
+**Send test alert** checks Loop’s alert presentation. It does not deliberately expire an account or report a real upload failure.
+
+## Credentials, privacy and removal
+
+New sign-ins save a session. Password retention is opt-in through **Remember password for session recovery**. Existing installations retain their recovery setting until changed. **Forget stored password** removes the saved recovery password.
+
+Credentials are account-scoped in iOS Keychain, available after first unlock, device-only and not synchronised through iCloud. The optional password can be retrieved by this app and sent to Glooko again during session recovery.
+
+There is no registered OAuth client in this project. Login uses Glooko’s patient-app session API. Credential rejection, account restrictions, MFA or an unavailable recovery secret can require interactive sign-in. Concurrent senders share recovery, and automatic password attempts are rate-limited.
+
+Upload history and diagnostics are stored in the app’s protected, account-scoped storage. Switching to a new account uses separate local history. Storage read/decode failures are surfaced; acknowledged history is not silently replaced with an empty queue.
+
+**Delete Glooko service** offers:
+
+- **Disconnect and keep history:** stop the service and remove its credentials; retain upload history for reconnection.
+- **Erase local data and remove:** after a second confirmation, remove this plugin’s local history, archives, diagnostics and credentials from the app.
+
+Neither option erases Loop’s original source records or data already stored in Glooko. Disabling **Upload insulin** retains queued insulin; carb foods remain independent.
+
+## Limits and historical uploads
+
+- This is delivered-dose reporting, not a complete reproduction of Loop or a pump download. Glooko receives no basal-rate, temporary-basal, suspension, automation or therapy-settings timeline from this route.
+- Zero-delivery hours are omitted. Both user-requested and automatic pump boluses are ordinary bolus entries in Glooko.
+- Quantities are prepared to three decimal places. Glooko can round graph points and summary statistics further; raw record confirmation and displayed totals have different precision.
+- Historical travel, time-zone changes and repeated local times around clock changes are not fully reconstructed. Do not assume complete historical timing fidelity across those cases.
+- Only retained Loop history and locally retained upload records can be recovered. The local insulin queue retains recent history for about 14 days while protecting unconfirmed work.
+- Previously imported records remain in Glooko. Duplicate data from independently connected uploaders is not automatically deduplicated across those separate routes.
+- Glucose, manual injection entries, meal descriptions, insulin concentrations and structured catalogue-drug links are not uploaded.
+- Other Glooko regions, MFA and a public, supported OAuth write contract are not implemented. The patient-app API can change independently of this project.
+
+Earlier versions used a virtual Omnipod/IBF compatibility route and a LibreView glucose importer. **The active service uses neither.** The remaining Omnipod/IBF code supports old stored history and migration. Insulin cut-over starts at the previous route’s submitted boundary, or its unsubmitted history start, to avoid intentionally counting the same delivery twice. Older native pump records are not relabelled or amended by the new generic-entry path.
+
+## Developer reference
+
+| Path | Role |
+|---|---|
+| `GlookoKit/InsulinOutbox.swift` | Delivered-volume aggregation, persistent insulin queue, names, amendments and exact readback |
+| `GlookoKit/CarbOutbox.swift` | Source-owned food identities, changes, deletion, confirmation and older meal migration |
+| `GlookoKit/GlookoClient.swift`, `SyncReader.swift` | Session transport and complete paginated reads |
+| `GlookoKit/SyncHealth.swift`, `SyncDiagnostics.swift` | Alert state and bounded diagnostic history |
+| `GlookoServiceKit/ReportingContext.swift` | LoopKit dose/settings adapter, source identity and recorded insulin name |
+| `GlookoServiceKit/GlookoService.swift` | Lifecycle, account binding, query draining, upload scheduling and credential recovery |
+| `GlookoServiceKitUI/` | Setup, status, controls and diagnostics |
+| `GlookoServiceKitPlugin/` | Loop plugin discovery and principal class |
+| `Tests/GlookoKitTests/` | Standalone core regressions |
+| `Tests/GlookoServiceKitTests/` | Actual iOS service, persistence, Keychain and intercepted transport |
+| `Documentation/Loop/` | Current next-dev host integration and historical dev patch |
+
+Current write routes are `PUT /api/v2/insulins` and `PUT /api/v2/foods`. A sync-complete request follows submission. Legacy meal records can be retired during carb migration. Insulin files, virtual reporting devices and the old device-file upload endpoint are not the current service’s upload path.
+
+For the standalone core:
+
+```sh
+swift test
+```
+
+For the iOS adapter, build the matching workspace products first, then run the **GlookoServiceTests** scheme on a simulator. Its dedicated host intercepts HTTP rather than contacting a real Glooko account. Simulated Keychain access requires an appropriately signed test host; ad hoc simulator signing was used for the documented run.
+
+`project.yml` is the XcodeGen source. After adding source files, regenerate `GlookoService.xcodeproj` and include it in the change. The UI framework captures its own Git commit, dirty flag and build date; a `.dirty` label identifies an uncommitted build.
+
+## Verification
+
+Verification recorded on **29 October 2026**:
+
+| Boundary | Evidence |
+|---|---|
+| Core | 39 passing tests; labels, original quantities, persistence and old-cache upgrades |
+| iOS service | 11 passing integration tests; per-dose insulin, historical settings, authentication, cancellation, retries and source draining |
+| Isolated live API | Production uploader added names to existing GUIDs, replayed without duplicates, corrected a synthetic name and verified cleanup |
+| Device integration | Signed installation, restored real-pump/insulin context and authenticated readback |
+| Documentation UI | Real captures from the existing `loop` simulator, using empty setup fields and an isolated account |
+
+Tests of catalogue-associated rapid-acting insulin demonstrated unwanted basal-to-bolus reclassification. Text-only names with a null medication reference preserved both delivery kinds in raw records, graphs and the tested statistics.
+
+These checks do not certify every pump, region, background state, historical date or Glooko report. Exact native Glooko row layout remains controlled by Glooko; the plugin’s verified contract is the uploaded record name and delivery data.
+
+See the [work records](.log/) for implementation decisions and tested contracts, and [screenshot provenance](Documentation/Screenshots/README.md) for capture details.
+
+## Licence and artwork
+
+Code is available under the [MIT licence](LICENSE). Glooko and Loop names and artwork belong to their respective owners. The service icon comes from Glooko’s [App Store listing](https://apps.apple.com/gb/app/glooko-track-diabetes-data/id471942748); the unmodified Loop artwork notice is included in [LoopArtwork-LICENSE.txt](GlookoServiceKitUI/LoopArtwork-LICENSE.txt).
