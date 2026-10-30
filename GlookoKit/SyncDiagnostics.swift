@@ -7,7 +7,16 @@ public struct GlookoDiagnosticEvent: Codable, Identifiable, Sendable {
     public let message: String
     public init(category: String, message: String, date: Date = Date()) {
         id = UUID(); self.date = date; self.category = category
-        self.message = GlookoClient.redact(message.prefix(512))
+        self.message = String(GlookoClient.redact(message).prefix(512))
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, date, category, message }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        date = try values.decode(Date.self, forKey: .date)
+        category = try values.decode(String.self, forKey: .category)
+        message = String(GlookoClient.redact(try values.decode(String.self, forKey: .message)).prefix(512))
     }
 }
 
@@ -54,6 +63,7 @@ public struct GlookoDiagnosticsRepository {
     public func load(accountID: String) throws -> GlookoDiagnostics {
         do {
             var state = try JSONDecoder().decode(GlookoDiagnostics.self, from: Data(contentsOf: url(accountID)))
+            state.inspectionError = state.inspectionError.map(GlookoClient.redact)
             state.trim(now: Date()); return state
         }
         catch CocoaError.fileReadNoSuchFile { return .init() }

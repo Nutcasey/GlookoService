@@ -2,7 +2,7 @@
 
 `GlookoService/main` targets the async APIs in **Loop and LoopKit next-dev**. It includes the next-dev port and selected-insulin labels. Use `main` for the service; do not select an older completion-handler variant.
 
-This guide covers the plugin’s workspace wiring and the two host behaviours it relies on. It supplements [Loop’s build documentation](https://loopkit.github.io/loopdocs/build/overview/), which covers signing and installation.
+This guide covers the plugin’s workspace wiring, startup behaviour and dose-source filtering. It supplements [Loop’s build documentation](https://loopkit.github.io/loopdocs/build/overview/), which covers signing and installation.
 
 ## 1. Prepare a matching workspace
 
@@ -51,9 +51,18 @@ Attach `settingsManager.deviceStatusProvider` before restoring device managers, 
 
 The service must receive the actual pump identity and recorded insulin selection. Do not work around missing metadata by inventing a manufacturer, serial or real-pump identity in the plugin.
 
-### Included current patch
+### Filter insulin while source provenance is available
 
-[next-dev-host-integration.patch](next-dev-host-integration.patch) contains both changes. It was generated and application-checked against Loop commit `415926dd`; its host source was also built for the documented simulator captures. The restored-device snapshot change was verified on a real device with unchanged reported therapy schedules and limits.
+Loop's dose store also reads insulin from other apps in Apple Health. A connected pump does not prove that every stored dose came from it. Glooko opts out of those external records through `RemoteDataService.doseDataIncludesOtherApps`.
+
+Apply [next-dev-dose-provenance.patch](next-dev-dose-provenance.patch) inside **LoopKit**. It adds that public option, defaulting to `true` for existing services, and an `includeOtherApps` dose-query parameter. When `false`, the query includes only this app's records with LoopKit origin. Manual entries and simulator delivery remain excluded by Glooko's existing checks. The change filters remote reporting queries; it does not change insulin ingestion, dosing calculations or stored therapy data.
+
+```sh
+git apply --check /path/to/GlookoService/Documentation/Loop/next-dev-dose-provenance.patch
+git apply /path/to/GlookoService/Documentation/Loop/next-dev-dose-provenance.patch
+```
+
+[next-dev-host-integration.patch](next-dev-host-integration.patch) contains the startup changes above and passes each service's source option into the dose query. Its current base is Loop `415926dd`; the LoopKit patch's base is `b6db6e18`. Earlier versions of the host patch contained only the startup changes. Check all three behaviours when upgrading.
 
 Inside the **Loop** checkout:
 
@@ -62,7 +71,7 @@ git apply --check /path/to/GlookoService/Documentation/Loop/next-dev-host-integr
 git apply /path/to/GlookoService/Documentation/Loop/next-dev-host-integration.patch
 ```
 
-Check your source first. If equivalent changes are already present, do not apply them twice. If another next-dev revision changes the surrounding code, review the two behaviours above rather than forcing the patch.
+Check your source first. If equivalent changes are already present, do not apply them twice. If another next-dev revision changes the surrounding code, review the behaviours above rather than forcing the patch. The current service requires the LoopKit source-filter option to compile.
 
 ## 4. Build and check
 

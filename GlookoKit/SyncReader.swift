@@ -60,7 +60,7 @@ public extension GlookoClient {
             let path = "/api/v2/\(resource)?\(query.percentEncodedQuery!)"
             let r: HTTPResult
             do { r = try await send("GET", host: host ?? region.dataHost, path: path, body: nil, authenticated: true) }
-            catch { return SyncScan(outcome: .requestFailed(status: -1, detail: "\(error)"), records: all) }
+            catch { return SyncScan(outcome: .requestFailed(status: -1, detail: Self.errorDescription(error)), records: all) }
             guard r.status == 200 else {
                 return SyncScan(outcome: .requestFailed(status: r.status, detail: Self.redact(r.text.prefix(200))), records: all)
             }
@@ -106,5 +106,44 @@ public struct WallClock {
     public func offset(_ date: Date) -> String {
         let s = timeZone.secondsFromGMT(for: date)
         return String(format: "%@%02d:%02d", s < 0 ? "-" : "+", abs(s) / 3600, abs(s) % 3600 / 60)
+    }
+
+    /// Recover an older entry's original clock from its own server GUID, never from today's zone.
+    static func storedOffset(timestamp: String, at date: Date) throws -> Int {
+        guard timestamp.count >= 19,
+              let wall = ISO8601DateFormatter().date(from: String(timestamp.prefix(19)) + "Z") else {
+            throw GlookoError.invalidResponse
+        }
+        let delta = wall.timeIntervalSince(date)
+        let offset = Int((delta / 60).rounded()) * 60
+        guard abs(delta - Double(offset)) < 1.01, abs(offset) <= 18 * 3600,
+              TimeZone(secondsFromGMT: offset) != nil else {
+            throw GlookoError.requestRejected("An older entry's original reporting clock could not be recovered; its timestamp was left unchanged")
+        }
+        return offset
+    }
+}
+
+extension GlookoClient {
+    /// A one-time read-only migration. Missing GUIDs have no server timestamp to preserve, so use
+    /// the captured historical context for their first submission. Never write after a partial scan.
+    func legacyClockOffsets(resource: String, dates: [String: Date], fallback: [String: Int]) async throws -> [String: Int] {
+        guard !dates.isEmpty else { return [:] }
+        let result = await scan(resource)
+        try Task.checkCancellation()
+        guard case .complete = result.outcome else {
+            if case .requestFailed(let status, _) = result.outcome, [301, 302, 303, 307, 308, 401, 403, 421].contains(status) {
+                throw GlookoError.authenticationRequired(status)
+            }
+            throw GlookoError.requestRejected("Original reporting clocks could not be read from Glooko; no entries were changed")
+        }
+        var offsets: [String: Int] = [:]
+        for (guid, date) in dates {
+            if let row = result.match(guid: guid).1 {
+                guard let timestamp = row["timestamp"] as? String else { throw GlookoError.invalidResponse }
+                offsets[guid] = try WallClock.storedOffset(timestamp: timestamp, at: date)
+            } else { offsets[guid] = fallback[guid] }
+        }
+        return offsets
     }
 }

@@ -82,7 +82,7 @@ Loop development/
 2. Add `GlookoServiceKitPlugin` to the **LoopWorkspace** scheme's Build action.
 3. Build that scheme, so the matching LoopKit products and the plugin are built together.
 
-The host must query restored services and publish device metadata after restoring its device managers. The integration guide includes a patch for those next-dev requirements. Its older `dev` patch is historical.
+The host must query restored services, publish restored device metadata and pass Glooko's dose-source filter into LoopKit. The integration guide includes current Loop and LoopKit patches. Its older `dev` patch is historical.
 
 Once installed, **Glooko** appears under Loop **Settings → Services → Add Service**. If it doesn't, check the workspace, the scheme and that the plugin is embedded before trying to sign in.
 
@@ -261,8 +261,12 @@ The service saves each change from Loop before acknowledging it. Nothing is lost
 - **Boluses and basal:** finished boluses become individual entries. Basal delivery is totalled per clock hour, using measured delivered volume when available. A running or still-changing delivery holds back an unfinished hour.
 - **Confirmation:** an entry stays queued until Glooko returns it with the expected identity, amount, time, delivery kind, flags and name. An accepted HTTP request alone is not confirmation.
 - **Stable identities:** a retry updates the same entry rather than creating a copy. Changes and deletions in Loop are applied to those entries. If a deleted entry is needed again, it gets a new revision, because Glooko doesn't revive a deleted ID.
+- **Source checks:** the host excludes doses from other HealthKit apps while their original provenance is still available. A connected pump alone does not establish a dose's source.
+- **Retention:** complete UTC days and their source intervals are retained together. A saved recomputation boundary prevents an older hour being recreated from partial delivery evidence.
 
 **Carbs** have their own queue and retries. An edit updates the same food entry, and a deletion soft-deletes it. A failed carb upload retries without needing another change in Loop.
+
+Insulin and carb confirmations fall back to a complete read when an already accepted retry falls outside the recent-update cursor. Temporary account-check failures remain retryable. Signing in again resumes retained work without requiring a new source event.
 
 **Glucose** has its own saved queue:
 1. It waits for Loop's glucose history to finish loading.
@@ -271,6 +275,8 @@ The service saves each change from Loop before acknowledging it. Nothing is lost
 4. A reading is confirmed only when it appears in **both** Glooko's stored CGM records and its graph data.
 
 Replaying an accepted reading doesn't create another copy. A conflicting or duplicate minute is reported for review, not overwritten.
+
+Before a glucose request starts, its readings are marked as potentially submitted in the saved queue. A later direct-sensor copy can replace a manufacturer-app copy only before submission. Once submission is possible, the original value is retained, including after cancellation or restart.
 
 ## Insulin names and Loop attribution
 
@@ -371,8 +377,8 @@ Neither option touches data in Glooko or Loop's own records. Turning off **Send 
 - **Delivered doses only:** this reports delivered doses. It is not a full copy of Loop or a pump download. Glooko gets no basal-rate, temporary-basal, suspension, automation or settings timeline this way.
 - **Bolus and basal detail:** zero-delivery hours are left out. Manual and automatic boluses are both ordinary bolus entries.
 - **Rounding:** amounts are sent to three decimal places. Glooko may round graphs and summaries further, so confirmed records and displayed totals can differ slightly.
-- **Travel and clock changes:** time-zone changes and repeated local times around clock changes aren't fully reconstructed in history.
-- **How far back:** only history Loop still holds, plus locally kept upload records, can be recovered. The insulin and glucose queues keep about 14 days and protect unconfirmed work.
+- **Travel and clock changes:** queued insulin and carbs retain their original reporting offsets through retries, edits and restarts. Older queued entries recover their existing Glooko timestamps before an edit or resend; a failed migration leaves them unchanged. Travel before Loop recorded a time-zone context, and repeated CSV clock minutes, cannot be fully reconstructed.
+- **How far back:** only history Loop still holds, plus locally kept upload records, can be recovered. The insulin and glucose queues keep about 14 days and protect unconfirmed work. On upgrading an older pruned insulin cache, the partial day at its previous retention boundary is preserved as recorded rather than recomputed from possibly missing doses. Earlier incorrect remote data cannot be reconstructed from source intervals that were already discarded.
 - **Other uploaders:** records already imported stay in Glooko. Data from separately connected uploaders isn't deduplicated against these entries.
 - **Glucose CSV:** times are to the minute. Corrections, and repeated clock minutes with different offsets, can't be represented safely; a conflict stops confirmation for that page. Values are sent to 0.01 mg/dL, and the originals stay in local storage.
 - **Glucose source label:** glucose shows as Abbott/CSV in Glooko, even for Dexcom. No route that keeps the native source has been found: the patient API's CGM PUT route returned "Not available".
@@ -450,7 +456,9 @@ Simulated Keychain access needs a suitably signed test host; ad hoc simulator si
 
 ## Verification
 
-Recorded on **29 October 2026**:
+The **30 October 2026** review repairs passed **46 core tests, 19 iOS service integration tests and eight LoopKit dose-query tests**. Coverage includes pruning and old-cache upgrades, in-flight glucose replacement, transient authentication failures, re-sign-in recovery, historical clocks, disabled-stream alerts, diagnostic redaction and source filtering. Four portable regression cases also failed against the original revision for the intended reasons.
+
+Earlier acceptance and deployment evidence, recorded on **29 October 2026**:
 
 | Area | Evidence |
 |---|---|

@@ -16,6 +16,47 @@ final class InsulinOutboxTests: XCTestCase {
         due.forEach { outbox.confirm($0) }
     }
 
+    func testRetentionNeverRecreatesPartialBasalHoursAcrossRestartsOrAnOldPrunedCache() throws {
+        let midnight = Date(timeIntervalSince1970: floor(hour.timeIntervalSince1970 / 86400) * 86400)
+        let now = midnight.addingTimeInterval(14 * 86400 + 1800)
+        let segments = (0..<3).map { index in
+            SourceDose(id: "segment-\(index)", kind: .tempBasal,
+                       start: midnight.addingTimeInterval(Double(index) * 1200),
+                       end: midnight.addingTimeInterval(Double(index + 1) * 1200), delivered: 1.0 / 3)
+        }
+        var outbox = InsulinOutbox(reportingStart: midnight)
+        outbox.stage(created: segments + [SourceDose(id: "recent", kind: .tempBasal,
+            start: now.addingTimeInterval(-7200), end: now.addingTimeInterval(-3600), delivered: 0)], deleted: [])
+        outbox.refresh(now: now)
+        XCTAssertEqual(outbox.due.map(\.units), [1])
+        sendAll(&outbox)
+        let confirmed = outbox.confirmedEntries
+        for offset in [0.0, 3600, 86400] {
+            outbox.prune(now: now.addingTimeInterval(offset))
+            outbox = try JSONDecoder().decode(InsulinOutbox.self, from: JSONEncoder().encode(outbox))
+            outbox.refresh(now: now.addingTimeInterval(offset))
+            XCTAssertTrue(outbox.due.isEmpty, "Pruning is not a clinical correction")
+        }
+
+        // An older build already lost the first segment and the tracked hour. Do not reconstruct
+        // a smaller hour from those fragments on the first launch of the corrected build.
+        var legacy = InsulinOutbox(reportingStart: midnight)
+        legacy.stage(created: segments + [SourceDose(id: "retained", kind: .tempBasal,
+            start: midnight.addingTimeInterval(86400), end: midnight.addingTimeInterval(90000), delivered: 1), SourceDose(id: "recent", kind: .tempBasal,
+            start: now.addingTimeInterval(-7200), end: now.addingTimeInterval(-3600), delivered: 0)], deleted: [])
+        legacy.refresh(now: now); sendAll(&legacy)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as? [String: Any])
+        json.removeValue(forKey: "recomputeFrom")
+        var doses = try XCTUnwrap(json["doses"] as? [String: Any]); doses.removeValue(forKey: "segment-0")
+        json["doses"] = doses
+        var entries = try XCTUnwrap(json["entries"] as? [String: Any]); entries.removeValue(forKey: confirmed[0].guid)
+        json["entries"] = entries
+        legacy = try JSONDecoder().decode(InsulinOutbox.self, from: JSONSerialization.data(withJSONObject: json))
+        legacy.refresh(now: now)
+        XCTAssertFalse(legacy.due.contains { $0.guid == confirmed[0].guid }, "Lost source data must not rewrite a pruned hour")
+        XCTAssertTrue(legacy.due.isEmpty)
+    }
+
     /// History committed locally but never submitted has not reached Glooko and must still be reported.
     func testCutOverStartsAtTheSubmittedBoundaryAndNeverDropsUnsubmittedHistory() {
         var log = PumpHistoryLog.newIdentity()
@@ -50,7 +91,7 @@ final class InsulinOutboxTests: XCTestCase {
         var outbox = InsulinOutbox(reportingStart: hour)
         let dose = bolus("b", 10, 2)
         outbox.stage(created: [dose], deleted: [])
-        outbox.refresh(now: at(60))
+        outbox.refresh(now: at(60), utcOffset: { _ in 3600 })
         let first = try XCTUnwrap(outbox.due.first)
         sendAll(&outbox)
         outbox.stage(created: [], deleted: [dose])
@@ -58,10 +99,11 @@ final class InsulinOutboxTests: XCTestCase {
         XCTAssertEqual(outbox.due.map(\.deleted), [true])
         sendAll(&outbox)
         outbox.stage(created: [dose], deleted: [])
-        outbox.refresh(now: at(62))
+        outbox.refresh(now: at(62), utcOffset: { _ in -18000 })
         let revived = try XCTUnwrap(outbox.due.first)
         XCTAssertNotEqual(revived.guid, first.guid)
         XCTAssertFalse(revived.deleted)
+        XCTAssertEqual(revived.utcOffset, first.utcOffset, "A replacement identity must keep the original reporting clock")
 
         // The same applies when Glooko already holds a live entry's GUID as deleted.
         outbox.supersede(revived)

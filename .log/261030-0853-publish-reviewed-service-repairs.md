@@ -1,0 +1,19 @@
+# 261030-0853 - Publish the reviewed service repairs
+
+After the implementation entry at 08:11, Garry explicitly authorised committing and pushing the latest GlookoService changes, and asked that the code be updated once verification was complete. This publication includes all nine reviewed repairs, focused regression coverage, integration documentation and the matching Loop/LoopKit patches. The earlier entry's statement that publication was not yet authorised describes its own point in time.
+
+## Final evidence and decisions
+
+The final production sources still match all 26 hashes captured for the successfully signed full-app build. The official results remain 46 core tests, 19 iOS service tests and eight real-store LoopKit dose-query tests, with zero failures. No runtime source changed after those runs. In addition to the four portable regressions already documented, five service regressions were exercised against the original adapter and core: held glucose replacement, recovery from the previous false account-mismatch latch, re-sign-in queue recovery, disabled-insulin alerts and legacy clock migration. All five failed for their intended assertions, with no unexpected errors. This checks that the added cases detect the faults in the old implementation.
+
+A final code-reviewer-cx inspection and whitespace checks found no remaining high-confidence issue in this change. Kept the narrow provenance option in LoopKit and the host rather than inferring insulin provenance after conversion to DoseEntry. Existing services retain their inclusive-query default. Both integration patches had already passed application checks against their documented pristine bases. They are part of this release because the service's source-filter option requires the matching SDK and host code.
+
+Considered blocking every historical entry without a preceding settings context. Rejected that extra restriction: expiry of older metadata does not prove a dose was invalid, and a refresh that drops such entries could turn previously reported history into deletions. Existing captured context fallback and server-GUID clock migration are retained; the documented limits on unavailable historical evidence still apply. No extra production guard or test from that exploration remains.
+
+The separate redesign agent owns the shared loop simulator and the final combined phone installation. Stopped simulator use after the collision and sent the handover through cmux-contact to Claude-PR2621-rebase, workspace:1000030002/surface:1000030007, from Codex-Glooko-fixes, surface:1000030026. Both Loop host files and the two LoopKit production edits are required in that build. The host startup edits were pre-existing local Glooko integration work; the query forwarding and SDK predicate are part of this repair. None should be dropped during the rebase.
+
+The earlier in-place phone build contains this same runtime source. Cleanup restored the phone's original Glooko Send glucose switch to ON; Send insulin remains OFF. The final accessibility capture reports Up to date and zero glucose waiting. No app rollback or data restoration was performed. Parent-workspace records describe the deployment and preservation checks; private captures remain ignored under Repos/glooko-fixes-261030. No further phone testing or shared-simulator operation is needed before publishing these verified code changes.
+
+## Publication scope
+
+Commit the service changes on main with the personal repository identity, then push and verify the remote revision. Publish the resulting submodule pointer and task records in the parent repository separately. Preserve unrelated parent edits and workspace wiring. The exact service hash and integration requirements will be sent to the redesign agent after the remote is verified. Final installation of the clean combined redesign/service build remains that agent's next step, not an installation already verified by this entry.

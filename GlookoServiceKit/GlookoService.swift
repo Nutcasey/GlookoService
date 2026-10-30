@@ -159,6 +159,11 @@ public final class GlookoService: Service {
         connectedAt = rawState["connectedAt"] as? Date ?? Date()
         lastAutomaticAuthentication = rawState["lastAutomaticAuthentication"] as? Date
         if let data = rawState["syncHealth"] as? Data, let stored = try? JSONDecoder().decode(GlookoSyncHealth.self, from: data) { syncHealth = stored }
+        if (rawState["accountVerificationVersion"] as? Int ?? 0) < 1,
+           syncHealth.authenticationRequired == "Glooko no longer confirms this account's identity. It may be restricted, closed or signed into another account." {
+            // Recheck identity under the corrected HTTP handling. Every write still requires verification.
+            syncHealth.authenticationRequired = nil
+        }
         glucoseEnabled = rawState["glucoseEnabled"] as? Bool ?? true
         if rawState["glucoseFormat"] as? Int == 2 {
             glucoseStorageCreated = rawState["glucoseStorageCreated"] as? Bool ?? false
@@ -167,17 +172,17 @@ public final class GlookoService: Service {
         }
         currentStatus.lastUploadAt = rawState["lastUploadAt"] as? Date
         currentStatus.lastAttemptAt = rawState["lastAttemptAt"] as? Date
-        currentStatus.lastError = rawState["lastError"] as? String
-        currentStatus.verificationDetail = rawState["verificationDetail"] as? String
+        currentStatus.lastError = (rawState["lastError"] as? String).map(GlookoClient.redact)
+        currentStatus.verificationDetail = (rawState["verificationDetail"] as? String).map(GlookoClient.redact)
         currentStatus.lastCarbConfirmedAt = rawState["lastCarbConfirmedAt"] as? Date
         carbIdentityVersion = rawState["carbIdentityVersion"] as? Int ?? 0
         // Older builds lack the marker, but a confirmation proves that an outbox already existed.
         carbStorageCreated = (rawState["carbStorageCreated"] as? Bool ?? false) || currentStatus.lastCarbConfirmedAt != nil
         currentStatus.lastReportCheckedAt = rawState["lastReportCheckedAt"] as? Date
-        currentStatus.reportWarnings = rawState["reportWarnings"] as? [String] ?? []
+        currentStatus.reportWarnings = (rawState["reportWarnings"] as? [String] ?? []).map(GlookoClient.redact)
         currentStatus.pumpSourceLabel = rawState["pumpSourceLabel"] as? String
         currentStatus.pumpSourceLabelVerifiedAt = rawState["pumpSourceLabelVerifiedAt"] as? Date
-        currentStatus.pumpSourceLabelError = rawState["pumpSourceLabelError"] as? String
+        currentStatus.pumpSourceLabelError = (rawState["pumpSourceLabelError"] as? String).map(GlookoClient.redact)
         if rawState["verificationVersion"] as? Int == 1 {
             currentStatus.lastConfirmedAt = rawState["lastConfirmedAt"] as? Date
             currentStatus.uploadedThrough = rawState["uploadedThrough"] as? Date
@@ -192,7 +197,7 @@ public final class GlookoService: Service {
                 if accountID == nil { accountID = history?.ownerID }
                 if let data = history?.reportingContextData { contexts = try JSONDecoder().decode([ReportingContext].self, from: data) }
             }
-            catch { storageError = "Could not restore pump history: \(error)"; currentStatus.lastError = storageError }
+            catch { storageError = "Could not restore pump history: \(GlookoClient.errorDescription(error))"; currentStatus.lastError = storageError }
         }
         if let accountID { restoreCarbs(accountID) }
         if let accountID { restoreDiagnostics(accountID); removeRetiredGlucoseData(accountID) }
@@ -240,6 +245,7 @@ public final class GlookoService: Service {
             value["sourceReplayRequired"] = sourceReplayRequired; value["alertThreshold"] = alertThreshold
             value["connectedAt"] = connectedAt; value["lastAutomaticAuthentication"] = lastAutomaticAuthentication
             value["syncHealth"] = try? JSONEncoder().encode(syncHealth)
+            value["accountVerificationVersion"] = 1
             value["email"] = storedEmail; value["accountID"] = accountID
             value["legacyCredentialsOwned"] = ownsLegacyCredentials
             value["lastUploadAt"] = currentStatus.lastUploadAt; value["lastAttemptAt"] = currentStatus.lastAttemptAt
@@ -310,6 +316,7 @@ public final class GlookoService: Service {
             client = fresh; onboarded = true; signInRequest = nil; currentStatus.lastError = nil
         }
         changed()
+        Task { await uploadIfNeeded(force: true) }
         return verified.email
     }
 
@@ -318,7 +325,7 @@ public final class GlookoService: Service {
     /// Disconnect keeps local history for reconnection. The UI offers a separate explicit erase action.
     public func completeDelete() {
         do { try removeService(eraseLocalData: false) }
-        catch { queue.sync { currentStatus.lastError = "Service removal failed: \(error)" }; changed() }
+        catch { queue.sync { currentStatus.lastError = "Service removal failed: \(GlookoClient.errorDescription(error))" }; changed() }
     }
 
     public func removeService(eraseLocalData: Bool) throws {
@@ -442,7 +449,7 @@ public final class GlookoService: Service {
         } catch {
             var reason: String?
             switch error {
-            case GlookoError.credentialRejected: reason = String(describing: error)
+            case GlookoError.credentialRejected: reason = GlookoClient.errorDescription(error)
             case GlookoError.twoFactorRequired: reason = "Glooko now requires an authentication method this session cannot use."
             case ServiceError.signInRequired: reason = "The Glooko session is no longer authorised and automatic password recovery is unavailable."
             case HistoryRepository.Failure.accountMismatch: reason = "Glooko no longer confirms this account's identity. It may be restricted, closed or signed into another account."
@@ -575,6 +582,11 @@ public final class GlookoService: Service {
             }
             guard needsSubmission else { return }
             var transport = try await authenticatedClient(generation)
+            do { try await migrateInsulinClocks(transport, generation: generation) }
+            catch GlookoError.authenticationRequired {
+                transport = try await authenticatedClient(generation, replacing: transport)
+                try await migrateInsulinClocks(transport, generation: generation)
+            }
             for _ in 0..<50 {
                 try check(generation)
                 let batch = try queue.sync { () throws -> ([InsulinOutbox.Entry], TimeZone)? in
@@ -604,7 +616,7 @@ public final class GlookoService: Service {
                     guard lifecycle == generation, !deleted, var outbox = insulin else { throw CancellationError() }
                     for entry in result.confirmed { outbox.confirm(entry) }
                     for entry in result.heldDeleted { outbox.supersede(entry) }
-                    if !result.heldDeleted.isEmpty { outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:)) }
+                    if !result.heldDeleted.isEmpty { outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:), utcOffset: { reportingOffset(for: $0, insulin: true) }) }
                     try saveInsulin(outbox)
                     currentStatus.lastUploadAt = Date(); currentStatus.verificationDetail = result.detail
                     recordDiagnostic("insulin", result.detail)
@@ -620,7 +632,7 @@ public final class GlookoService: Service {
             }
         } catch is CancellationError { }
         catch {
-            queue.sync { if lifecycle == generation && !deleted { currentStatus.lastError = String(describing: error); recordDiagnostic("insulin error", String(describing: error)) } }
+            queue.sync { if lifecycle == generation && !deleted { currentStatus.lastError = GlookoClient.errorDescription(error); recordDiagnostic("insulin error", GlookoClient.errorDescription(error)) } }
         }
     }
 
@@ -642,7 +654,7 @@ public final class GlookoService: Service {
         if outbox.doses.count < before {
             recordDiagnostic("source", "Excluded \(before - outbox.doses.count) doses from a simulator or unknown pump")
         }
-        outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:))
+        outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:), utcOffset: { reportingOffset(for: $0, insulin: true) })
         outbox.prune(now: Date())
         if outbox != insulin { try saveInsulin(outbox) }
         guard contexts.last?.isRealPump == true || outbox.due.isEmpty == false else {
@@ -656,6 +668,46 @@ public final class GlookoService: Service {
         guard let context = contexts.last(where: { $0.date <= dose.start }), let name = context.insulinName,
               !contexts.contains(where: { $0.date > dose.start && $0.date < dose.end && $0.insulinName != name }) else { return nil }
         return name
+    }
+
+    private func reportingOffset(for date: Date, insulin: Bool) -> Int {
+        let context = contexts.last { $0.date <= date }
+        let zone = insulin ? context?.timeZone : context?.controllerTimeZone
+        return (zone ?? .current).secondsFromGMT(for: date)
+    }
+
+    private func migrateInsulinClocks(_ transport: GlookoClient, generation: UUID) async throws {
+        let captured = queue.sync { () -> ([String: Date], [String: Int]) in
+            let entries = insulin?.legacyClockEntries ?? []
+            return (Dictionary(uniqueKeysWithValues: entries.map { ($0.guid, $0.start) }),
+                    Dictionary(uniqueKeysWithValues: entries.map { ($0.guid, reportingOffset(for: $0.start, insulin: true)) }))
+        }
+        let offsets = try await transport.legacyClockOffsets(resource: "insulins", dates: captured.0, fallback: captured.1)
+        try check(generation)
+        try queue.sync {
+            guard lifecycle == generation, !deleted, var outbox = insulin else { throw CancellationError() }
+            guard !offsets.isEmpty else { return }
+            outbox.pinClockOffsets(offsets)
+            try saveInsulin(outbox)
+            recordDiagnostic("insulin", "Preserved original reporting clocks for \(offsets.count) older entries")
+        }
+    }
+
+    private func migrateCarbClocks(_ transport: GlookoClient, generation: UUID) async throws {
+        let captured = queue.sync { () -> ([String: Date], [String: Int]) in
+            let entries = carbs?.legacyClockCarbs ?? []
+            return (Dictionary(uniqueKeysWithValues: entries.map { ($0.guids.food, $0.start) }),
+                    Dictionary(uniqueKeysWithValues: entries.map { ($0.guids.food, reportingOffset(for: $0.start, insulin: false)) }))
+        }
+        let offsets = try await transport.legacyClockOffsets(resource: "foods", dates: captured.0, fallback: captured.1)
+        try check(generation)
+        try queue.sync {
+            guard lifecycle == generation, !deleted, var outbox = carbs else { throw CancellationError() }
+            guard !offsets.isEmpty else { return }
+            outbox.pinClockOffsets(offsets)
+            try saveCarbs(outbox); carbs = outbox
+            recordDiagnostic("carbs", "Preserved original reporting clocks for \(offsets.count) older entries")
+        }
     }
 
     /// A failed restoration remains visible. A first run cuts over from the retired pump-file history.
@@ -678,7 +730,7 @@ public final class GlookoService: Service {
             insulinStorageError = nil
         } catch {
             insulin = nil
-            insulinStorageError = "Could not restore insulin uploads: \(error)"
+            insulinStorageError = "Could not restore insulin uploads: \(GlookoClient.errorDescription(error))"
             currentStatus.lastError = insulinStorageError
         }
     }
@@ -730,6 +782,11 @@ public final class GlookoService: Service {
         }
         do {
             var transport = try await authenticatedClient(generation)
+            do { try await migrateCarbClocks(transport, generation: generation) }
+            catch GlookoError.authenticationRequired {
+                transport = try await authenticatedClient(generation, replacing: transport)
+                try await migrateCarbClocks(transport, generation: generation)
+            }
             while true {
                 try check(generation)
                 let batch = try queue.sync { () throws -> ([SourceCarb], Set<String>, TimeZone)? in
@@ -769,7 +826,7 @@ public final class GlookoService: Service {
         } catch is CancellationError { }
         catch {
             queue.sync {
-                if lifecycle == generation, !deleted { currentStatus.carbError = "Carbs not sent yet: \(error)"; recordDiagnostic("carb error", String(describing: error)) }
+                if lifecycle == generation, !deleted { currentStatus.carbError = "Carbs not sent yet: \(GlookoClient.errorDescription(error))"; recordDiagnostic("carb error", GlookoClient.errorDescription(error)) }
             }
         }
     }
@@ -798,7 +855,7 @@ public final class GlookoService: Service {
             carbStorageError = nil; currentStatus.carbError = nil
         } catch {
             carbs = nil
-            carbStorageError = "Could not restore carb uploads: \(error)"
+            carbStorageError = "Could not restore carb uploads: \(GlookoClient.errorDescription(error))"
             currentStatus.carbError = carbStorageError
         }
     }
@@ -813,7 +870,7 @@ public final class GlookoService: Service {
     /// Remove only the retired uploader's own cache; Loop's glucose store is never touched.
     private func removeRetiredGlucoseData(_ accountID: String) {
         do { try repository.removeRetiredGlucoseData(accountID: accountID); retiredDataCleanupError = nil }
-        catch { retiredDataCleanupError = "Retired upload cache could not be removed: \(error)" }
+        catch { retiredDataCleanupError = "Retired upload cache could not be removed: \(GlookoClient.errorDescription(error))" }
     }
 
     private func restoreGlucose(_ accountID: String) {
@@ -822,7 +879,7 @@ public final class GlookoService: Service {
                                                   required: glucoseStorageCreated)
             glucoseStorageError = nil; currentStatus.glucoseError = nil
         } catch {
-            glucose = nil; glucoseStorageError = "Could not restore glucose uploads: \(error)"
+            glucose = nil; glucoseStorageError = "Could not restore glucose uploads: \(GlookoClient.errorDescription(error))"
             currentStatus.glucoseError = glucoseStorageError
         }
     }
@@ -878,7 +935,13 @@ public final class GlookoService: Service {
                 try check(generation)
                 let batch = try queue.sync { () throws -> [SourceGlucose] in
                     guard lifecycle == generation, glucoseTaskID == id, glucoseEnabled, glucoseQueryDrained else { throw CancellationError() }
-                    return Array(glucose?.due.prefix(500) ?? [])
+                    guard var outbox = glucose else { throw ServiceError.blocked(glucoseStorageError ?? "Glucose storage is unavailable") }
+                    let due = Array(outbox.due.prefix(500))
+                    if !due.isEmpty {
+                        outbox.markSubmitted(due)
+                        try saveGlucose(outbox); glucose = outbox
+                    }
+                    return due
                 }
                 guard !batch.isEmpty else { return }
                 let confirmed: [SourceGlucose]
@@ -909,7 +972,7 @@ public final class GlookoService: Service {
                 if confirmed.count < batch.count { return }
             }
         } catch is CancellationError { }
-        catch { queue.sync { if lifecycle == generation, !deleted { currentStatus.glucoseError = "Glucose not confirmed: \(error)"; recordDiagnostic("glucose error", String(describing: error)) } } }
+        catch { queue.sync { if lifecycle == generation, !deleted { currentStatus.glucoseError = "Glucose not confirmed: \(GlookoClient.errorDescription(error))"; recordDiagnostic("glucose error", GlookoClient.errorDescription(error)) } } }
     }
 
     public func sendTestAlert() {
@@ -928,7 +991,7 @@ public final class GlookoService: Service {
             if insulinEnabled, insulin?.due.isEmpty == false { pending.insert(.insulin) }
             if carbs?.due.isEmpty == false { pending.insert(.carbs) }
             if glucoseEnabled, glucose?.due.isEmpty == false { pending.insert(.glucose) }
-            var reason = insulinStorageError ?? carbStorageError ?? (glucoseEnabled ? glucoseStorageError : nil)
+            var reason = (insulinEnabled ? insulinStorageError : nil) ?? carbStorageError ?? (glucoseEnabled ? glucoseStorageError : nil)
             if sourceReplayRequired { reason = currentStatus.sourceReplayDetail }
             if insulinEnabled {
                 if Date().timeIntervalSince(connectedAt) > 300, contexts.last?.isRealPump != true {
@@ -1004,7 +1067,7 @@ public final class GlookoService: Service {
     private func restoreDiagnostics(_ accountID: String) {
         do { diagnosticState = try diagnosticRepository.load(accountID: accountID); diagnosticStorageError = nil; diagnosticPersistenceAvailable = true }
         catch {
-            diagnosticStorageError = "Saved diagnostics could not be read: \(error)"
+            diagnosticStorageError = "Saved diagnostics could not be read: \(GlookoClient.errorDescription(error))"
             diagnosticPersistenceAvailable = false // Preserve the unreadable file for investigation.
         }
     }
@@ -1014,7 +1077,7 @@ public final class GlookoService: Service {
         diagnosticState.record(.init(category: category, message: message))
         guard let accountID, diagnosticPersistenceAvailable else { return }
         do { try diagnosticRepository.save(diagnosticState, accountID: accountID); diagnosticStorageError = nil }
-        catch { diagnosticStorageError = "Diagnostics could not be saved: \(error)" }
+        catch { diagnosticStorageError = "Diagnostics could not be saved: \(GlookoClient.errorDescription(error))" }
     }
 
     private func observeRequests(_ transport: GlookoClient, generation: UUID) {
@@ -1043,7 +1106,12 @@ public final class GlookoService: Service {
                     self.changed()
                 }
                 do {
-                    let transport = try await self.authenticatedClient(generation)
+                    var transport = try await self.authenticatedClient(generation)
+                    do { try await self.migrateInsulinClocks(transport, generation: generation) }
+                    catch GlookoError.authenticationRequired {
+                        transport = try await self.authenticatedClient(generation, replacing: transport)
+                        try await self.migrateInsulinClocks(transport, generation: generation)
+                    }
                     let captured = try self.queue.sync { () throws -> ([InsulinOutbox.Entry], TimeZone, [SourceGlucose]) in
                         guard self.lifecycle == generation, !self.deleted, let outbox = self.insulin else {
                             throw ServiceError.blocked(self.insulinStorageError ?? "Insulin history is unavailable")
@@ -1069,8 +1137,8 @@ public final class GlookoService: Service {
                 catch {
                     self.queue.sync {
                         guard self.lifecycle == generation, !self.deleted else { return }
-                        self.diagnosticState.inspectionError = GlookoClient.redact(String(describing: error))
-                        self.recordDiagnostic("live check error", String(describing: error))
+                        self.diagnosticState.inspectionError = GlookoClient.errorDescription(error)
+                        self.recordDiagnostic("live check error", GlookoClient.errorDescription(error))
                     }
                 }
             }
@@ -1098,6 +1166,7 @@ extension GlookoService: RemoteDataService {
 
     // Loop follows each changed query with an empty callback. Commit only after that drain boundary.
     public var doseDataLimit: Int? { nil }
+    public var doseDataIncludesOtherApps: Bool { false }
     public var glucoseDataLimit: Int? { queue.sync { glucoseEnabled ? 500 : 0 } }
 
     public func uploadDoseData(created: [DoseEntry], deleted: [DoseEntry]) async throws {
@@ -1116,7 +1185,7 @@ extension GlookoService: RemoteDataService {
             changed()
             if created.isEmpty && deleted.isEmpty { Task { await uploadIfNeeded() } }
         } catch {
-            queue.sync { currentStatus.lastError = "Could not store source history: \(error)"; recordDiagnostic("source error", String(describing: error)) }
+            queue.sync { currentStatus.lastError = "Could not store source history: \(GlookoClient.errorDescription(error))"; recordDiagnostic("source error", GlookoClient.errorDescription(error)) }
             changed(); throw error
         }
     }
@@ -1144,7 +1213,7 @@ extension GlookoService: RemoteDataService {
             changed()
             if stored.isEmpty { Task { await uploadIfNeeded() } }
         } catch {
-            queue.sync { currentStatus.lastError = "Could not store source settings: \(error)"; recordDiagnostic("source error", String(describing: error)) }
+            queue.sync { currentStatus.lastError = "Could not store source settings: \(GlookoClient.errorDescription(error))"; recordDiagnostic("source error", GlookoClient.errorDescription(error)) }
             changed(); throw error
         }
     }
@@ -1161,7 +1230,8 @@ extension GlookoService: RemoteDataService {
                 try outbox.stage(source.map { carb in
                     SourceCarb(id: carb.syncIdentifier ?? carb.uuid?.uuidString ?? "carb-\(carb.startDate.timeIntervalSince1970)",
                                start: carb.startDate, grams: carb.grams, version: carb.syncVersion ?? 0, deleted: carb.operation == .delete,
-                               provenanceIdentifier: carb.provenanceIdentifier)
+                               provenanceIdentifier: carb.provenanceIdentifier,
+                               utcOffset: reportingOffset(for: carb.startDate, insulin: false))
                 })
                 try saveCarbs(outbox)
                 carbs = outbox
@@ -1169,7 +1239,7 @@ extension GlookoService: RemoteDataService {
             changed()
             Task { await sendCarbs() }
         } catch {
-            queue.sync { currentStatus.carbError = "Could not store carbs: \(error)" }
+            queue.sync { currentStatus.carbError = "Could not store carbs: \(GlookoClient.errorDescription(error))" }
             changed(); throw error
         }
     }
@@ -1203,7 +1273,7 @@ extension GlookoService: RemoteDataService {
             changed()
             if stored.isEmpty { Task { await sendGlucose() } }
         } catch {
-            queue.sync { currentStatus.glucoseError = "Could not store glucose: \(error)"; recordDiagnostic("glucose error", String(describing: error)) }
+            queue.sync { currentStatus.glucoseError = "Could not store glucose: \(GlookoClient.errorDescription(error))"; recordDiagnostic("glucose error", GlookoClient.errorDescription(error)) }
             changed(); throw error
         }
     }
