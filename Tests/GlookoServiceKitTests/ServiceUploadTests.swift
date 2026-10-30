@@ -226,18 +226,19 @@ final class ServiceUploadTests: XCTestCase {
         try await original.uploadDoseData(created: [basal], deleted: [])
         try await original.uploadDoseData(created: [], deleted: [])
         try await eventually { !OfflineGlooko.insulinRecords.isEmpty }
-        // Relaunch long after the service was connected, with Loop restarting both source streams.
+        // Relaunch long after the service was connected. Loop does not re-query a restored service.
         var state = original.rawState
         state["connectedAt"] = Date().addingTimeInterval(-7200)
         let restored = try XCTUnwrap(GlookoService(rawState: state)); services.append(restored)
         let host = RecordingHost()
         restored.serviceDelegate = host
         await restored.uploadIfNeeded(force: true)
-        XCTAssertNotNil(restored.status.lastError, "The initial upload must wait for both source queries")
-        try await restored.uploadSettingsData([])
-        try await restored.uploadDoseData(created: [], deleted: [])
-        await restored.uploadIfNeeded(force: true)
-        XCTAssertNil(restored.status.lastError, "A drained empty queue must clear its resolved source-wait message")
+        XCTAssertNil(restored.status.lastError, "Streams drained before the relaunch must not wait for another source event")
+        // State written before the flags were stored counts as drained once it holds a settings context.
+        state["doseQueryDrained"] = nil; state["settingsQueryDrained"] = nil
+        let legacy = try XCTUnwrap(GlookoService(rawState: state)); services.append(legacy)
+        await legacy.uploadIfNeeded(force: true)
+        XCTAssertNil(legacy.status.lastError)
         await MainActor.run {}
         let next = DoseEntry(type: .basal, startDate: start.addingTimeInterval(3600), endDate: start.addingTimeInterval(4200), value: 0.5, unit: .unitsPerHour, decisionId: nil, syncIdentifier: "next-basal")
         try await restored.uploadDoseData(created: [next], deleted: [])
@@ -247,6 +248,20 @@ final class ServiceUploadTests: XCTestCase {
         let issued = await MainActor.run { host.issued }
         XCTAssertFalse(issued.contains { $0.identifier.alertIdentifier == "uploads-paused" },
                        "A changed batch followed by Loop's drain is normal operation: \(issued.map(\.foregroundContent?.body))")
+    }
+
+    func testARestoredServiceStillWaitsForAStreamThatWasMidDrain() async throws {
+        let original = try await signedIn()
+        try await original.uploadSettingsData([completeSettings()])
+        try await original.uploadSettingsData([])
+        try await original.uploadDoseData(created: [], deleted: [])
+        let basal = DoseEntry(type: .basal, startDate: start, endDate: start.addingTimeInterval(3600), value: 1, unit: .unitsPerHour, decisionId: nil, syncIdentifier: "basal")
+        try await original.uploadDoseData(created: [basal], deleted: [])
+        let restored = try XCTUnwrap(GlookoService(rawState: original.rawState)); services.append(restored)
+        await restored.uploadIfNeeded(force: true)
+        XCTAssertEqual(restored.status.lastError, "Waiting for Loop to finish reading source history and settings")
+        try await restored.uploadDoseData(created: [], deleted: [])
+        try await eventually { !OfflineGlooko.insulinRecords.isEmpty }
     }
 
     func testUploadAndLiveCheckShareOnePasswordRecoveryAndStopAfterCredentialRejection() async throws {
