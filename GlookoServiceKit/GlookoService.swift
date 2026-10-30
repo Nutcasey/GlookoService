@@ -72,10 +72,11 @@ public final class GlookoService: Service {
     private var history: PumpHistoryLog?
     private var storageError: String?
     private var contexts: [ReportingContext] = []
+    /// Persisted: a restored service is not re-queried, so its anchors and these flags carry over until
+    /// Loop's next source change. Every changed batch is followed by an empty drain callback.
     private var doseQueryDrained = false
     private var settingsQueryDrained = false
-    /// Process-local like the drain flags: Loop restarts both streams on each launch, and every changed
-    /// dose batch is followed by an empty drain callback. Only a continuous wait is a paused stream.
+    /// Process-local. Only a continuous wait is a paused stream.
     private var sourceStreamsWaitingSince: Date? = Date()
     private var deleted = false
     private var lifecycle = UUID()
@@ -202,6 +203,10 @@ public final class GlookoService: Service {
         if let accountID { restoreCarbs(accountID) }
         if let accountID { restoreDiagnostics(accountID); removeRetiredGlucoseData(accountID) }
         if let accountID, onboarded { restoreInsulin(accountID); restoreGlucose(accountID) }
+        // State from before these flags were stored drained its settings if it kept a context.
+        doseQueryDrained = rawState["doseQueryDrained"] as? Bool ?? !contexts.isEmpty
+        settingsQueryDrained = rawState["settingsQueryDrained"] as? Bool ?? !contexts.isEmpty
+        if doseQueryDrained && settingsQueryDrained { sourceStreamsWaitingSince = nil }
         sourceReplayRequired = onboarded && carbIdentityVersion < 1
         if sourceReplayRequired {
             currentStatus.sourceReplayDetail = "Legacy carb ownership needs source replay. Remove and re-add this service, keeping local history, so Loop can supply its available cache."
@@ -261,6 +266,7 @@ public final class GlookoService: Service {
             value["pumpSourceLabelVerifiedAt"] = currentStatus.pumpSourceLabelVerifiedAt
             value["pumpSourceLabelError"] = currentStatus.pumpSourceLabelError
             value["reportingContexts"] = try? JSONEncoder().encode(contexts)
+            value["doseQueryDrained"] = doseQueryDrained; value["settingsQueryDrained"] = settingsQueryDrained
             return value
         }
     }
