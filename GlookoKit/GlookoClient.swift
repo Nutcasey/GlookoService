@@ -168,6 +168,14 @@ public final class GlookoClient: @unchecked Sendable {
 
     // MARK: Helpers
 
+    public static func errorDescription(_ error: Error) -> String {
+        let transport = error as NSError
+        if transport.domain == NSURLErrorDomain {
+            return "Network request failed (\(transport.domain), code \(transport.code))"
+        }
+        return redact(String(describing: error))
+    }
+
     static func twoFactorRequired(_ data: Data) -> Bool {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
         return ["twoFaRequired", "two_fa_required", "twoFactorRequired"].contains { (obj[$0] as? Bool) == true }
@@ -176,6 +184,16 @@ public final class GlookoClient: @unchecked Sendable {
     /// Strips anything that looks like a token or e-mail from text shown in diagnostics.
     public static func redact<S: StringProtocol>(_ text: S) -> String {
         var s = String(text)
+        // NSError descriptions include failing URLs, including patient IDs in graph queries.
+        // Sanitise every URL, not just the deliberately sparse request traces.
+        if let expression = try? NSRegularExpression(pattern: #"(?i)https?://[^\s<>\"\]]+"#) {
+            for match in expression.matches(in: s, range: NSRange(s.startIndex..., in: s)).reversed() {
+                guard let range = Range(match.range, in: s) else { continue }
+                var url = URLComponents(string: String(s[range]))
+                url?.user = nil; url?.password = nil; url?.query = nil; url?.fragment = nil
+                s.replaceSubrange(range, with: url?.string ?? "<redacted URL>")
+            }
+        }
         for pattern in [#"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+"#, #"(?i)(token|cookie|session)[^,}]*"#] {
             s = s.replacingOccurrences(of: pattern, with: "<redacted>", options: .regularExpression)
         }

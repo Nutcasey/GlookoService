@@ -2,6 +2,22 @@ import XCTest
 @testable import GlookoKit
 
 final class SyncDiagnosticsTests: XCTestCase {
+    func testNetworkErrorsAndOlderSavedEventsNeverExposeURLQueriesOrCredentials() throws {
+        let url = URL(string: "https://user:password@eu.glooko.test/api/v3/graph/data?patient=private-code&startDate=private-date#private-fragment")!
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut, userInfo: [NSURLErrorFailingURLErrorKey: url])
+        let raw = String(describing: error)
+        let event = GlookoDiagnosticEvent(category: "glucose error", message: raw)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(event)) as? [String: Any])
+        json["message"] = raw // A journal written by the previous version.
+        let restored = try JSONDecoder().decode(GlookoDiagnosticEvent.self, from: JSONSerialization.data(withJSONObject: json))
+        for message in [event.message, restored.message, GlookoClient.redact(raw)] {
+            for secret in ["private-code", "private-date", "private-fragment", "user:password"] {
+                XCTAssertFalse(message.contains(secret))
+            }
+            XCTAssertTrue(message.contains("/api/v3/graph/data"))
+        }
+    }
+
     func testDiagnosticsAreBoundedAccountScopedAndPreserveUnreadableEvidence() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

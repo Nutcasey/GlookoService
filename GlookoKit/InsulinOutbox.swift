@@ -17,6 +17,8 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
         public var externalID: String
         /// Nil only for entries saved before display names were uploaded.
         public var name: String? = nil
+        /// Fixed when first queued; nil identifies a pre-offset entry requiring readback migration.
+        public var utcOffset: Int? = nil
     }
 
     public struct Tracked: Codable, Equatable, Sendable {
@@ -28,6 +30,8 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
 
     /// Nothing before this is reported. On cut-over it is the last boundary the previous uploader submitted.
     public private(set) var reportingStart: Date
+    /// Separate from the original reporting period, so pruning cannot recreate earlier basal hours.
+    public private(set) var recomputeFrom: Date?
     public private(set) var doses: [String: SourceDose] = [:]
     public private(set) var entries: [String: Tracked] = [:]
     /// Glooko never revives a soft-deleted GUID, so an identity wanted again after deletion moves to a new revision.
@@ -37,13 +41,14 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
     public static let basalSettle: TimeInterval = 15 * 60
     public static let retention: TimeInterval = 14 * 86400
 
-    public init(reportingStart: Date) { self.reportingStart = reportingStart }
+    public init(reportingStart: Date) { self.reportingStart = reportingStart; recomputeFrom = reportingStart }
 
     /// Deletions first, then creations; a re-created identity replaces the previous version.
     public mutating func stage(created: [SourceDose], deleted: [SourceDose]) {
         for dose in deleted { doses[dose.id] = nil }
-        for dose in created where dose.kind != .resume && dose.end > reportingStart && Self.isValid(dose) {
-            if dose.kind == .bolus && dose.start < reportingStart { continue }
+        let boundary = max(reportingStart, recomputeFrom ?? reportingStart)
+        for dose in created where dose.kind != .resume && dose.end > boundary && Self.isValid(dose) {
+            if dose.kind == .bolus && dose.start < boundary { continue }
             doses[dose.id] = dose
         }
     }
@@ -64,21 +69,27 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
     }
 
     /// Recomputes the wanted entries. Known entries no longer wanted become deletions; unsent ones are dropped.
-    public mutating func refresh(now: Date, insulinName: (SourceDose) -> String? = { $0.insulinName }) {
+    public mutating func refresh(now: Date, insulinName: (SourceDose) -> String? = { $0.insulinName },
+                                 utcOffset: (Date) -> Int = { TimeZone.current.secondsFromGMT(for: $0) }) {
+        initialiseRetentionBoundary(now: now)
+        let boundary = max(reportingStart, recomputeFrom ?? reportingStart)
         // Metadata-only upgrade: keep the same GUID, amount and time. Never guess an old dose's drug.
         for (guid, tracked) in entries where !tracked.current.deleted && tracked.current.name == nil {
             entries[guid]?.current.name = Self.displayName([nil])
         }
         var wanted: [String: Entry] = [:]
-        for dose in doses.values where dose.kind == .bolus && !dose.isMutable && dose.end <= now.addingTimeInterval(-Self.bolusSettle) {
+        for dose in doses.values where dose.kind == .bolus && dose.start >= boundary && !dose.isMutable && dose.end <= now.addingTimeInterval(-Self.bolusSettle) {
             let units = Self.rounded(dose.delivered ?? dose.programmed)
             guard units > 0 else { continue }
-            let guid = identity("loop-insulin-bolus|\(dose.id)")
+            let resolved = identity("loop-insulin-bolus|\(dose.id)")
+            let guid = resolved.guid
+            let old = entries[guid]?.current ?? resolved.previous
             wanted[guid] = Entry(guid: guid, kind: .bolus, start: dose.start, units: units, deleted: false,
-                                 externalID: "loop:bolus:\(guid.prefix(8).lowercased())", name: Self.displayName([insulinName(dose)]))
+                                 externalID: "loop:bolus:\(guid.prefix(8).lowercased())", name: Self.displayName([insulinName(dose)]),
+                                 utcOffset: old?.start == dose.start ? old?.utcOffset : utcOffset(dose.start))
         }
         let horizon = basalHorizon(now: now)
-        let hours = Self.completeHours(from: reportingStart, through: horizon)
+        let hours = Self.completeHours(from: boundary, through: horizon)
         // Hours are rounded from a running total within each UTC day, so their sum keeps the measured volume
         // (two halves of one 0.025 U pulse report 0.013 + 0.012, not 0.026) and a change only re-sends that day.
         var day = -1, running = 0.0
@@ -98,12 +109,16 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
             // period beginning inside that hour can never overwrite a different quantity under the same GUID.
             let epoch = Int(hour.timeIntervalSince1970)
             let seed = from == hour ? "\(epoch)" : "\(epoch)|from:\(Int(from.timeIntervalSince1970.rounded(.down)))"
-            let guid = identity("loop-insulin-basal|\(seed)")
+            let resolved = identity("loop-insulin-basal|\(seed)")
+            let guid = resolved.guid
+            let old = entries[guid]?.current ?? resolved.previous
             wanted[guid] = Entry(guid: guid, kind: .basal, start: from, units: units, deleted: false,
-                                 externalID: "loop:basal:\(seed)", name: Self.displayName(contributions.map(\.1)))
+                                 externalID: "loop:basal:\(seed)", name: Self.displayName(contributions.map(\.1)),
+                                 utcOffset: old?.start == from ? old?.utcOffset : utcOffset(from))
         }
         let lastHourEnd = hours.last?.addingTimeInterval(3600) ?? reportingStart
         for (guid, tracked) in entries where wanted[guid] == nil {
+            if tracked.current.start < boundary { continue }
             // A basal hour beyond the current horizon is not yet recomputable; leave it as it is.
             if tracked.current.kind == .basal, tracked.current.start >= lastHourEnd { continue }
             if tracked.submitted || tracked.confirmed != nil {
@@ -131,14 +146,15 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
     }
 
     /// The current GUID for a seed, moving past a revision Glooko holds (or may hold) as deleted.
-    private mutating func identity(_ seed: String) -> String {
+    private mutating func identity(_ seed: String) -> (guid: String, previous: Entry?) {
         var revision = revisions?[seed] ?? 0
         func guid() -> String { Self.guid(revision == 0 ? seed : "\(seed)|r\(revision)") }
+        let previous = entries[guid()]?.current
         while let tracked = entries[guid()], tracked.current.deleted, tracked.submitted || tracked.confirmed != nil {
             revision += 1
         }
         if revision > 0 { revisions = (revisions ?? [:]).merging([seed: revision]) { _, new in new } }
-        return guid()
+        return (guid(), previous)
     }
 
     /// Entries whose current version Glooko has not confirmed.
@@ -164,13 +180,54 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
         entries[entry.guid]?.confirmed = entry
     }
 
-    /// Old confirmed entries and doses which can no longer change an unconfirmed hour are pruned.
+    /// A complete UTC day owns the rounding accumulator and all source intervals contributing to it.
+    /// Never prune a day with pending entries or mutable delivery, and never move the boundary backwards.
     public mutating func prune(now: Date) {
+        initialiseRetentionBoundary(now: now)
         let cutoff = now.addingTimeInterval(-Self.retention)
         let oldestDue = due.map(\.start).min() ?? now
-        let keepFrom = min(cutoff, oldestDue.addingTimeInterval(-3600))
-        doses = doses.filter { $0.value.end >= keepFrom || $0.value.isMutable }
+        let oldestMutable = doses.values.filter(\.isMutable).map(\.start).min() ?? now
+        let day = Self.utcDay(min(cutoff, oldestDue, oldestMutable))
+        let keepFrom = max(recomputeFrom ?? reportingStart, max(reportingStart, day))
+        recomputeFrom = keepFrom
+        doses = doses.filter { $0.value.end > keepFrom || $0.value.isMutable }
         entries = entries.filter { $0.value.current.start >= keepFrom || $0.value.confirmed != $0.value.current }
+    }
+
+    /// Old caches may already have lost part of their first retained day. Freeze those saved entries
+    /// rather than recomputing their quantities from incomplete evidence during the upgrade.
+    private mutating func initialiseRetentionBoundary(now: Date) {
+        guard recomputeFrom == nil else { return }
+        guard entries.values.contains(where: { $0.submitted || $0.confirmed != nil }) else {
+            recomputeFrom = reportingStart // A never-submitted backlog must still be computed in full.
+            return
+        }
+        let oldestDue = due.map(\.start).min() ?? now
+        let oldestMutable = doses.values.filter(\.isMutable).map(\.start).min() ?? now
+        let cutoffInstant = min(now.addingTimeInterval(-Self.retention), oldestDue, oldestMutable)
+        guard reportingStart < cutoffInstant else { recomputeFrom = reportingStart; return }
+        let cutoff = Self.utcDay(cutoffInstant)
+        // The old implementation's cutoff could be inside this day, even if a long retained dose
+        // starts earlier. Its first complete later day is the earliest safe recomputation point.
+        recomputeFrom = max(reportingStart, cutoff == cutoffInstant ? cutoff : cutoff.addingTimeInterval(86400))
+    }
+
+    private static func utcDay(_ date: Date) -> Date {
+        Date(timeIntervalSince1970: floor(date.timeIntervalSince1970 / 86400) * 86400)
+    }
+
+    var legacyClockEntries: [Entry] {
+        entries.values.compactMap { tracked in
+            if let confirmed = tracked.confirmed, confirmed.utcOffset == nil { return confirmed }
+            return tracked.current.utcOffset == nil ? tracked.current : nil
+        }
+    }
+
+    mutating func pinClockOffsets(_ offsets: [String: Int]) {
+        for (guid, offset) in offsets {
+            if entries[guid]?.current.utcOffset == nil { entries[guid]?.current.utcOffset = offset }
+            if entries[guid]?.confirmed?.utcOffset == nil { entries[guid]?.confirmed?.utcOffset = offset }
+        }
     }
 
     /// Whole clock hours, aligned to UTC, whose end is not after the horizon.
@@ -207,7 +264,7 @@ public extension GlookoRecords {
         insulin(guid: entry.guid, timestamp: entry.start, units: entry.units, type: entry.kind.rawValue,
                 deleted: entry.deleted, extra: ["medicationGuid": NSNull(), "deviceDelivered": 1, "externalId": entry.externalID,
                                                "name": entry.name ?? "Insulin via Loop"],
-                timeZone: timeZone)
+                timeZone: entry.utcOffset.flatMap(TimeZone.init(secondsFromGMT:)) ?? timeZone)
     }
 }
 
@@ -277,7 +334,7 @@ public extension GlookoClient {
                 record["insulinType"] as? String == entry.kind.rawValue &&
                 (record["deviceDelivered"] as? Bool) == true && (medication == nil || medication is NSNull) &&
                 (entry.name == nil || record["name"] as? String == entry.name) &&
-                stamp == WallClock(timeZone: timeZone).string(entry.start).prefix(19)
+                stamp == WallClock(timeZone: entry.utcOffset.flatMap(TimeZone.init(secondsFromGMT:)) ?? timeZone).string(entry.start).prefix(19)
         default: return false
         }
     }

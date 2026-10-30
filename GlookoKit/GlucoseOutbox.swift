@@ -33,6 +33,8 @@ public struct GlucoseOutbox: Codable, Equatable, Sendable {
     public struct Entry: Codable, Equatable, Sendable {
         public var reading: SourceGlucose
         public var confirmed: Bool = false
+        /// Nil is a legacy queue: a previously attempted request cannot be ruled out.
+        public var submitted: Bool? = nil
     }
     public private(set) var entries: [String: Entry] = [:]
     public var historyStart: Date?
@@ -64,14 +66,16 @@ public struct GlucoseOutbox: Codable, Equatable, Sendable {
                 // Manufacturer apps and direct BLE integrations can publish different copies within one
                 // minute. Prefer the directly received measurement, keeping already reported values.
                 if reading.priority < old.reading.priority { continue }
-                if !old.confirmed && reading.priority > old.reading.priority {
-                    staged.entries[reading.minute] = Entry(reading: reading)
-                    continue
+                if reading.priority > old.reading.priority {
+                    if !old.confirmed && old.submitted == false {
+                        staged.entries[reading.minute] = Entry(reading: reading, submitted: false)
+                    }
+                    continue // A possibly submitted copy is immutable, including after a restart.
                 }
                 guard old.reading.encodedValue == reading.encodedValue else {
                     throw GlookoError.requestRejected("Two glucose readings conflict at \(reading.minute). CSV cannot correct them; review the original readings.")
                 }
-            } else { staged.entries[reading.minute] = Entry(reading: reading) }
+            } else { staged.entries[reading.minute] = Entry(reading: reading, submitted: false) }
         }
         self = staged
     }
@@ -82,6 +86,12 @@ public struct GlucoseOutbox: Codable, Equatable, Sendable {
     public mutating func confirm(_ reading: SourceGlucose) {
         guard entries[reading.minute]?.reading == reading else { return }
         entries[reading.minute]?.confirmed = true
+    }
+
+    public mutating func markSubmitted(_ readings: [SourceGlucose]) {
+        for reading in readings where entries[reading.minute]?.reading == reading {
+            entries[reading.minute]?.submitted = true
+        }
     }
 
     /// Glooko keeps the imported history. Bound phone storage and future replay, while retaining every

@@ -9,15 +9,18 @@ struct ReportingContext: Codable, Equatable {
     var sourceID: String?
     var sourceName: String
     var timeZoneIdentifier: String
+    var controllerTimeZoneIdentifier: String?
     var settings: IBFPumpSettings?
     var problem: String?
     var insulinName: String?
 
     var timeZone: TimeZone { TimeZone(identifier: timeZoneIdentifier) ?? .current }
+    var controllerTimeZone: TimeZone { controllerTimeZoneIdentifier.flatMap(TimeZone.init(identifier:)) ?? timeZone }
     var isRealPump: Bool { sourceID != nil }
 
     init(_ stored: StoredSettings) {
         date = stored.date
+        controllerTimeZoneIdentifier = stored.controllerTimeZone.identifier
         insulinName = stored.insulinType?.brandName
         timeZoneIdentifier = stored.basalRateSchedule?.timeZone.identifier ?? stored.controllerTimeZone.identifier
         let device = stored.pumpDevice
@@ -79,7 +82,8 @@ struct ReportingContext: Codable, Equatable {
 
     func hasSameConfiguration(as other: ReportingContext) -> Bool {
         sourceID == other.sourceID && sourceName == other.sourceName && settings == other.settings &&
-        timeZoneIdentifier == other.timeZoneIdentifier && problem == other.problem && insulinName == other.insulinName
+        timeZoneIdentifier == other.timeZoneIdentifier && controllerTimeZoneIdentifier == other.controllerTimeZoneIdentifier &&
+        problem == other.problem && insulinName == other.insulinName
     }
 }
 

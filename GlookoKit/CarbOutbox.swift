@@ -11,10 +11,12 @@ public struct SourceCarb: Codable, Equatable, Sendable {
     public var provenanceIdentifier: String?
     /// The legacy GUID seed, retained when an existing unnamespaced entry is bound to its source.
     public var destinationID: String?
+    public var utcOffset: Int?
 
-    public init(id: String, start: Date, grams: Double, version: Int, deleted: Bool, provenanceIdentifier: String? = nil) {
+    public init(id: String, start: Date, grams: Double, version: Int, deleted: Bool, provenanceIdentifier: String? = nil, utcOffset: Int? = nil) {
         self.id = id; self.start = start; self.grams = grams; self.version = version; self.deleted = deleted
         self.provenanceIdentifier = provenanceIdentifier
+        self.utcOffset = utcOffset
     }
 
     public var storageID: String {
@@ -100,6 +102,9 @@ public struct CarbOutbox: Codable, Equatable, Sendable {
             }
             if carb.deleted, staged.entries[key] == nil { continue }
             carb.destinationID = staged.entries[key]?.carb.destinationID
+            if let previous = staged.entries[key]?.carb, previous.start == carb.start {
+                carb.utcOffset = previous.utcOffset
+            }
             staged.entries[key, default: Entry(carb: carb)].carb = carb
         }
         self = staged
@@ -120,6 +125,21 @@ public struct CarbOutbox: Codable, Equatable, Sendable {
         entry.confirmedVersion = carb.version; entry.confirmedDeleted = carb.deleted; entry.retireMeal = nil
         entry.confirmedCarb = carb
         entries[carb.storageID] = entry
+    }
+
+    var legacyClockCarbs: [SourceCarb] {
+        entries.values.compactMap { entry in
+            if let confirmed = entry.confirmedCarb, confirmed.utcOffset == nil { return confirmed }
+            return entry.carb.utcOffset == nil ? entry.carb : nil
+        }
+    }
+
+    mutating func pinClockOffsets(_ offsets: [String: Int]) {
+        for (id, entry) in entries {
+            guard let offset = offsets[entry.carb.guids.food] else { continue }
+            if entry.carb.utcOffset == nil { entries[id]?.carb.utcOffset = offset }
+            if entry.confirmedCarb?.utcOffset == nil { entries[id]?.confirmedCarb?.utcOffset = offset }
+        }
     }
 
     /// Deterministic RFC 4122-shaped GUIDs for the meal and food made from one source entry.
@@ -148,7 +168,7 @@ public extension GlookoClient {
         for carb in carbs {
             let ids = carb.guids
             var records = GlookoRecords.carbs(mealGuid: ids.meal, foodGuid: ids.food, timestamp: carb.start, grams: carb.grams,
-                                              deleted: carb.deleted, timeZone: timeZone)
+                                              deleted: carb.deleted, timeZone: carb.utcOffset.flatMap(TimeZone.init(secondsFromGMT:)) ?? timeZone)
             records.food["mealGuid"] = NSNull()
             if retiringMeals.contains(carb.storageID) {
                 records.meal["softDeleted"] = 1
@@ -180,8 +200,8 @@ public extension GlookoClient {
         let scan = await scan("foods", since: Self.isoTimestamp(readbackFrom))
         try Task.checkCancellation()
         guard case .complete = scan.outcome else { return ([], "Carbs sent; Glooko readback incomplete (\(scan.outcome))") }
-        let wall = WallClock(timeZone: timeZone)
-        let confirmed = carbs.filter { carb in
+        func matches(_ carb: SourceCarb, in scan: SyncScan) -> Bool {
+            let wall = WallClock(timeZone: carb.utcOffset.flatMap(TimeZone.init(secondsFromGMT:)) ?? timeZone)
             let (outcome, record) = scan.match(guid: carb.guids.food)
             switch outcome {
             case .foundDeleted: return carb.deleted
@@ -192,6 +212,15 @@ public extension GlookoClient {
                 return !carb.deleted && standalone && grams.map { abs($0 - carb.grams) < 0.01 } == true && stamp == wall.string(carb.start).prefix(19)
             default: return false
             }
+        }
+        var confirmed = carbs.filter { matches($0, in: scan) }
+        // Accepted no-op retries (including repeated deletions) need not acquire a new server update time.
+        let unresolved = carbs.filter { !confirmed.contains($0) && scan.match(guid: $0.guids.food).0 == .completeNoMatch }
+        if !unresolved.isEmpty {
+            try Task.checkCancellation()
+            let full = await self.scan("foods")
+            try Task.checkCancellation()
+            if case .complete = full.outcome { confirmed += unresolved.filter { matches($0, in: full) } }
         }
         return (confirmed, "\(confirmed.count) of \(carbs.count) carb entries confirmed in Glooko")
     }

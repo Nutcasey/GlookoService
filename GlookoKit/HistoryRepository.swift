@@ -12,12 +12,16 @@ public extension GlookoClient {
     func verifiedAccount(expectedID: String? = nil, expectedEmail: String? = nil) async throws -> GlookoAccount {
         let result = try await get("/api/v2/users")
         if [301, 302, 303, 307, 308, 401, 403, 421].contains(result.status) { throw GlookoError.authenticationRequired(result.status) }
-        guard result.status == 200,
-              let obj = try JSONSerialization.jsonObject(with: result.body) as? [String: Any],
+        guard result.status == 200 else {
+            throw GlookoError.requestRejected("Glooko account check failed (HTTP \(result.status)); it will be retried")
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: result.body) as? [String: Any],
               let users = obj["users"] as? [[String: Any]], users.count == 1,
               let id = users[0]["guid"] as? String, !id.isEmpty,
-              let email = users[0]["email"] as? String, !email.isEmpty,
-              (users[0]["softDeleted"] as? Bool) != true,
+              let email = users[0]["email"] as? String, !email.isEmpty else {
+            throw GlookoError.invalidResponse
+        }
+        guard (users[0]["softDeleted"] as? Bool) != true,
               expectedID.map({ $0.caseInsensitiveCompare(id) == .orderedSame }) ?? true,
               expectedEmail.map({ $0.caseInsensitiveCompare(email) == .orderedSame }) ?? true else {
             throw HistoryRepository.Failure.accountMismatch

@@ -8,6 +8,44 @@ final class AuthenticationTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [AuthenticationProtocol.self]
         return GlookoClient(region: .init(signInHosts: ["eu.glooko.test", "global.glooko.test"], dataHost: "eu.glooko.test"), configuration: config)
     }
+
+    func testAccountChecksDistinguishTransientFailuresFromAnActualIdentityMismatch() async throws {
+        for status in [429, 500, 503] {
+            let c = client { _, _ in (status, [:], Data("{}".utf8)) }; c.sessionCookie = "offline=owned"
+            do { _ = try await c.verifiedAccount(expectedID: "owned"); XCTFail("Expected transient rejection") }
+            catch GlookoError.requestRejected { }
+        }
+        let c = client { _, index in
+            let body = index == 0 ? "{}" : #"{"users":[{"guid":"owned","email":"offline@example.test","softDeleted":false}]}"#
+            return (200, [:], Data(body.utf8))
+        }
+        c.sessionCookie = "offline=owned"
+        do { _ = try await c.verifiedAccount(expectedID: "owned"); XCTFail("Expected invalid response") }
+        catch GlookoError.invalidResponse { }
+        let recovered = try await c.verifiedAccount(expectedID: "owned")
+        XCTAssertEqual(recovered.id, "owned")
+        do { _ = try await c.verifiedAccount(expectedID: "another"); XCTFail("Expected identity rejection") }
+        catch HistoryRepository.Failure.accountMismatch { }
+    }
+
+    func testAcceptedCarbsOutsideTheRecentCursorStillConfirmIncludingRepeatedDeletion() async throws {
+        let stamp = Date(timeIntervalSince1970: 1_790_812_800)
+        for deleted in [false, true] {
+            let carb = SourceCarb(id: "accepted", start: stamp, grams: 25, version: 1, deleted: deleted)
+            let c = client { request, _ in
+                if request.httpMethod != "GET" { return (204, [:], Data()) }
+                let since = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "lastUpdatedAt" }?.value
+                let row: [String: Any] = ["guid": carb.guids.food, "timestamp": "2026-10-01T00:00:00.000Z",
+                    "carbs": 25, "mealGuid": NSNull(), "softDeleted": deleted]
+                let page: [String: Any] = ["foods": since?.hasPrefix("1970-") == true ? [row] : [],
+                    "lastPage": true, "lastUpdatedAt": "2026-10-01T00:00:00.000Z", "lastGuid": carb.guids.food]
+                return (200, [:], try JSONSerialization.data(withJSONObject: page))
+            }
+            c.sessionCookie = "offline=owned"
+            let result = try await c.submitCarbs([carb], timeZone: TimeZone(secondsFromGMT: 0)!)
+            XCTAssertEqual(result.confirmed, [carb])
+        }
+    }
     func testRequestsIdentifyLoopWithoutClaimingGlookoAppOrBrowserIdentity() async throws {
         let c = client { request, index in
             XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "Loop-GlookoService (+https://github.com/Nutcasey/GlookoService)")

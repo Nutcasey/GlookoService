@@ -70,8 +70,7 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertTrue(predicate(), "Expected the observable operation to finish before its deadline")
     }
 
-    private func completeSettings(insulinType: InsulinType? = nil, date: Date? = nil) -> StoredSettings {
-        let zone = TimeZone(secondsFromGMT: 0)!
+    private func completeSettings(insulinType: InsulinType? = nil, date: Date? = nil, zone: TimeZone = TimeZone(secondsFromGMT: 0)!) -> StoredSettings {
         let settings = StoredSettings(date: start.addingTimeInterval(-1), maximumBasalRatePerHour: 3, maximumBolus: 10,
             suspendThreshold: GlucoseThreshold(unit: .milligramsPerDeciliter, value: 75),
             basalRateSchedule: BasalRateSchedule(dailyItems: [.init(startTime: 0, value: 1)], timeZone: zone),
@@ -81,7 +80,7 @@ final class ServiceUploadTests: XCTestCase {
                                  firmwareVersion: nil, softwareVersion: nil, localIdentifier: "offline-pump", udiDeviceIdentifier: nil))
         // StoredSettings's target is supplied separately to keep its declaration-order arguments explicit.
         let target = GlucoseRangeSchedule(unit: .milligramsPerDeciliter, dailyItems: [.init(startTime: 0, value: DoubleRange(minValue: 100, maxValue: 110))], timeZone: zone)!
-        let complete = StoredSettings(date: date ?? settings.date, glucoseTargetRangeSchedule: target,
+        let complete = StoredSettings(date: date ?? settings.date, controllerTimeZone: zone, glucoseTargetRangeSchedule: target,
             maximumBasalRatePerHour: settings.maximumBasalRatePerHour, maximumBolus: settings.maximumBolus,
             suspendThreshold: settings.suspendThreshold, insulinType: insulinType, basalRateSchedule: settings.basalRateSchedule,
             insulinSensitivitySchedule: settings.insulinSensitivitySchedule, carbRatioSchedule: settings.carbRatioSchedule,
@@ -392,6 +391,131 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: accountFolder.appendingPathComponent("insulin.json").path))
     }
 
+    func testGlucoseReplacementDuringSubmissionKeepsTheValueThatCouldReachGlooko() async throws {
+        let service = try await signedIn(historyStart: start)
+        service.configureUploads(insulin: false, cellular: true)
+        OfflineGlooko.hold("POST /api/v3/device/file/upload")
+        let manufacturer = StoredGlucoseSample(provenanceIdentifier: "com.dexcom.app", syncIdentifier: "manufacturer",
+            startDate: start, quantity: LoopQuantity(unit: .milligramsPerDeciliter, doubleValue: 120))
+        try await service.uploadGlucoseData([manufacturer])
+        try await service.uploadGlucoseData([])
+        try await eventually { OfflineGlooko.hasHeldRequest }
+        try await service.uploadGlucoseData([sensor("direct", 121)])
+        try await service.uploadGlucoseData([])
+        OfflineGlooko.release()
+        try await eventually { service.summary.pendingGlucose == 0 }
+        XCTAssertEqual(OfflineGlooko.glucoseValues, [12000])
+        XCTAssertEqual(OfflineGlooko.glucoseWriteCount, 1)
+        let restored = try XCTUnwrap(GlookoService(rawState: service.rawState)); services.append(restored)
+        try await restored.uploadGlucoseData([sensor("replay", 121)])
+        try await restored.uploadGlucoseData([])
+        await restored.uploadIfNeeded(force: true)
+        XCTAssertEqual(restored.summary.pendingGlucose, 0)
+        XCTAssertEqual(OfflineGlooko.glucoseWriteCount, 1)
+    }
+
+    func testTransientAccountFailureAndAnOlderFalseMismatchRecoverWithoutPasswordReplay() async throws {
+        let service = try await signedIn()
+        OfflineGlooko.setAccountStatus(503)
+        try await stage(carb(20), in: service)
+        try await eventually { service.status.carbError != nil }
+        XCTAssertNil(service.options.authenticationRequired)
+        var state = service.rawState
+        state.removeValue(forKey: "accountVerificationVersion")
+        var health = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(state["syncHealth"] as? Data)) as? [String: Any])
+        health["authenticationRequired"] = "Glooko no longer confirms this account's identity. It may be restricted, closed or signed into another account."
+        state["syncHealth"] = try JSONSerialization.data(withJSONObject: health)
+        let restored = try XCTUnwrap(GlookoService(rawState: state)); services.append(restored)
+        XCTAssertNil(restored.options.authenticationRequired)
+        OfflineGlooko.setAccountStatus(200)
+        await restored.uploadIfNeeded(force: true)
+        XCTAssertEqual(restored.summary.pendingCarbs, 0)
+        XCTAssertEqual(OfflineGlooko.signInCount, 1)
+    }
+
+    func testSigningInAgainResumesRetainedCarbsWithoutAnotherSourceCallback() async throws {
+        let service = try await signedIn()
+        OfflineGlooko.failNextFoodWrite()
+        try await stage(carb(20), in: service)
+        try await eventually { service.status.carbError != nil }
+        _ = try await service.signIn(email: "offline@example.test", password: "invented", rememberPassword: true,
+                                    insulinEnabled: false, allowCellular: true)
+        try await eventually { service.summary.pendingCarbs == 0 }
+        XCTAssertEqual(OfflineGlooko.foodWriteCount, 2)
+        XCTAssertEqual(OfflineGlooko.signInCount, 2)
+    }
+
+    func testDisabledInsulinStorageFailureOnlyAlertsAfterInsulinIsEnabled() async throws {
+        let service = try await signedIn()
+        service.configureUploads(insulin: false, cellular: true)
+        try Data("damaged insulin".utf8).write(to: accountFolder.appendingPathComponent("insulin.json"))
+        let restored = try XCTUnwrap(GlookoService(rawState: service.rawState)); services.append(restored)
+        let host = RecordingHost(); restored.serviceDelegate = host
+        XCTAssertNotNil(restored.status.lastError)
+        await MainActor.run {}
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let disabled = await MainActor.run { host.issued }
+        XCTAssertFalse(disabled.contains { $0.identifier.alertIdentifier == "uploads-paused" })
+        restored.configureUploads(insulin: true, cellular: true)
+        for _ in 0..<100 {
+            if await MainActor.run(body: { host.issued.contains { $0.identifier.alertIdentifier == "uploads-paused" } }) { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let enabled = await MainActor.run { host.issued }
+        XCTAssertTrue(enabled.contains { $0.identifier.alertIdentifier == "uploads-paused" })
+    }
+
+    func testLegacyReportingClocksSurviveTravelRestartVerificationAndEdits() async throws {
+        let service = try await signedIn(historyStart: start)
+        try await service.uploadSettingsData([completeSettings()])
+        try await service.uploadSettingsData([])
+        func bolus(_ units: Double) -> DoseEntry {
+            DoseEntry(type: .bolus, startDate: start.addingTimeInterval(600), value: units, unit: .units,
+                      decisionId: nil, deliveredUnits: units, syncIdentifier: "clock-bolus")
+        }
+        try await service.uploadDoseData(created: [bolus(2)], deleted: [])
+        try await service.uploadDoseData(created: [], deleted: [])
+        try await stage(carb(27), in: service)
+        await service.uploadIfNeeded(force: true)
+        try await eventually { OfflineGlooko.insulinRecords.count == 1 && service.summary.pendingCarbs == 0 }
+        let insulinStamp = try XCTUnwrap(OfflineGlooko.insulinRecords.first?["timestamp"] as? String)
+        let foodStamp = try XCTUnwrap(OfflineGlooko.foodTimestamp)
+        let state = service.rawState
+        service.configureUploads(insulin: false, cellular: true, glucose: false)
+        // Turn the real persisted queues into their pre-offset schema; keep server records intact.
+        for (name, fields) in [("insulin.json", ["current", "confirmed"]), ("carbs.json", ["carb", "confirmedCarb"])] {
+            let file = accountFolder.appendingPathComponent(name)
+            var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+            var entries = try XCTUnwrap(json["entries"] as? [String: [String: Any]])
+            for id in Array(entries.keys) {
+                for field in fields {
+                    if var record = entries[id]?[field] as? [String: Any] {
+                        record.removeValue(forKey: "utcOffset"); entries[id]?[field] = record
+                    }
+                }
+            }
+            json["entries"] = entries
+            try JSONSerialization.data(withJSONObject: json).write(to: file)
+        }
+        let restored = try XCTUnwrap(GlookoService(rawState: state)); services.append(restored)
+        try await restored.uploadSettingsData([completeSettings(date: Date(), zone: TimeZone(secondsFromGMT: 3600)!)])
+        try await restored.uploadSettingsData([])
+        try await restored.uploadDoseData(created: [], deleted: [])
+        await restored.checkGlookoNow()
+        XCTAssertEqual(restored.diagnostics.state.lastInspection?.insulinMatched, 1)
+        XCTAssertEqual(restored.diagnostics.state.lastInspection?.insulinMismatched, 0)
+        try await stage(carb(35, version: 2, operation: .update), in: restored)
+        try await restored.uploadDoseData(created: [bolus(3)], deleted: [])
+        try await restored.uploadDoseData(created: [], deleted: [])
+        await restored.uploadIfNeeded(force: true)
+        try await eventually { restored.summary.pendingCarbs == 0 && restored.summary.pendingDoses == 0 }
+        XCTAssertEqual(OfflineGlooko.insulinRecords.count, 1)
+        XCTAssertEqual(OfflineGlooko.insulinRecords.first?["timestamp"] as? String, insulinStamp)
+        XCTAssertEqual((OfflineGlooko.insulinRecords.first?["value"] as? NSNumber)?.doubleValue, 3)
+        XCTAssertEqual(OfflineGlooko.foodTimestamp, foodStamp)
+        XCTAssertEqual(OfflineGlooko.foodGrams, 35)
+    }
+
 }
 
 private extension URLSessionConfiguration {
@@ -419,10 +543,12 @@ private final class OfflineGlooko: URLProtocol {
     private static var glucoseWrites = 0
     private static var failGlucoseWrite = false
     private static var glucoseGraphHidden = false
+    private static var accountStatus = 200
     private var stopped = false
     private static func access<T>(_ action: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return action() }
 
-    static func reset(accountID: String) { access { account = accountID; rejectCredentials = false; signIns = 0; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; insulins = [:]; cancellations = 0; glucose = [:]; glucoseWrites = 0; failGlucoseWrite = false; glucoseGraphHidden = false } }
+    static func reset(accountID: String) { access { account = accountID; rejectCredentials = false; signIns = 0; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; insulins = [:]; cancellations = 0; glucose = [:]; glucoseWrites = 0; failGlucoseWrite = false; glucoseGraphHidden = false; accountStatus = 200 } }
+    static func setAccountStatus(_ status: Int) { access { accountStatus = status } }
     static var glucoseWriteCount: Int { access { glucoseWrites } }
     static var glucoseValues: [Int] { access { glucose.values.compactMap { $0["glucoseValue"] as? Int } } }
     static func failNextGlucoseWrite() { access { failGlucoseWrite = true } }
@@ -434,6 +560,7 @@ private final class OfflineGlooko: URLProtocol {
     static var heldRequestCancelled: Bool { access { held?.stopped == true } }
     static var foodWriteCount: Int { access { writes } }
     static var foodGrams: Double? { access { (foods.values.first?["carbs"] as? NSNumber)?.doubleValue } }
+    static var foodTimestamp: String? { access { foods.values.first?["timestamp"] as? String } }
     static var foodReadSince: Date? { access { since } }
     static var insulinRecords: [[String: Any]] { access { Array(insulins.values) } }
     static var cancelledRequests: Int { access { cancellations } }
@@ -465,6 +592,7 @@ private final class OfflineGlooko: URLProtocol {
         Self.access {
             if path.contains("sign_in") { Self.signIns += 1; if Self.rejectCredentials { status = 401 } else { headers["Set-Cookie"] = "_logbook-web_session=invented; Path=/; Secure" } }
             else if path == "/api/v2/users", Self.rejectCredentials { status = 401 }
+            else if path == "/api/v2/users", Self.accountStatus != 200 { status = Self.accountStatus }
             else if path == "/api/v2/users" { payload = ["users": [["guid": Self.account, "email": "offline@example.test", "softDeleted": false]]] }
             else if path == "/api/v3/session/users" { payload = ["currentUser": ["glookoCode": "offline-patient"]] }
             else if path == "/api/v2/cgm/egvs" { payload = ["egvs": Array(Self.glucose.values)] }

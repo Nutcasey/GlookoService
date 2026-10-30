@@ -1,0 +1,50 @@
+diff --git a/LoopKit/InsulinKit/InsulinDeliveryStore.swift b/LoopKit/InsulinKit/InsulinDeliveryStore.swift
+index 133f833b..d11e71fa 100644
+--- a/LoopKit/InsulinKit/InsulinDeliveryStore.swift
++++ b/LoopKit/InsulinKit/InsulinDeliveryStore.swift
+@@ -859,7 +859,7 @@ extension InsulinDeliveryStore {
+         case failure(Error)
+     }
+
+-    public func executeDoseQuery(fromQueryAnchor queryAnchor: QueryAnchor?, limit: Int, completion: @escaping (DoseQueryResult) -> Void) {
++    public func executeDoseQuery(fromQueryAnchor queryAnchor: QueryAnchor?, limit: Int, includeOtherApps: Bool = true, completion: @escaping (DoseQueryResult) -> Void) {
+         queue.async {
+             var queryAnchor = queryAnchor ?? QueryAnchor()
+             var queryCreatedResult = [DoseEntry]()
+@@ -875,6 +875,13 @@ extension InsulinDeliveryStore {
+                 let storedRequest: NSFetchRequest<CachedInsulinDeliveryObject> = CachedInsulinDeliveryObject.fetchRequest()
+
+                 storedRequest.predicate = NSPredicate(format: "modificationCounter > %d", queryAnchor.modificationCounter)
++                if !includeOtherApps {
++                    storedRequest.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
++                        storedRequest.predicate!,
++                        NSPredicate(format: "provenanceIdentifier == %@", self.provenanceIdentifier),
++                        NSPredicate(format: "hasLoopKitOrigin == YES")
++                    ])
++                }
+                 storedRequest.sortDescriptors = [NSSortDescriptor(key: "modificationCounter", ascending: true)]
+                 storedRequest.fetchLimit = limit
+
+diff --git a/LoopKit/Service/RemoteDataService.swift b/LoopKit/Service/RemoteDataService.swift
+index 89543d1a..984d9b46 100644
+--- a/LoopKit/Service/RemoteDataService.swift
++++ b/LoopKit/Service/RemoteDataService.swift
+@@ -60,6 +60,10 @@ public protocol RemoteDataService: Service {
+     /// The maximum number of dose data to upload to the remote data service at one time.
+     var doseDataLimit: Int? { get }
+
++    /// Whether dose queries may include records read from other apps in HealthKit.
++    /// Pump-reporting services can opt out while the store still has the source provenance.
++    var doseDataIncludesOtherApps: Bool { get }
++
+     /**
+      Upload dose data to the remote data service.
+
+@@ -132,6 +136,7 @@ public extension RemoteDataService {
+     var alertDataLimit: Int? { return nil }
+     var carbDataLimit: Int? { return nil }
+     var doseDataLimit: Int? { return nil }
++    var doseDataIncludesOtherApps: Bool { return true }
+     var dosingDecisionDataLimit: Int? { return nil }
+     var glucoseDataLimit: Int? { return nil }
+     var pumpEventDataLimit: Int? { return nil }

@@ -1,6 +1,8 @@
+diff --git a/Loop/Managers/LoopAppManager.swift b/Loop/Managers/LoopAppManager.swift
+index 9d2d6868..8fd457cd 100644
 --- a/Loop/Managers/LoopAppManager.swift
 +++ b/Loop/Managers/LoopAppManager.swift
-@@ -435,10 +435,12 @@
+@@ -435,11 +435,13 @@ class LoopAppManager: NSObject {
 
          loopDataManager.deliveryDelegate = deviceDataManager
 
@@ -8,16 +10,19 @@
 -
          settingsManager.deviceStatusProvider = deviceDataManager
          settingsManager.displayGlucosePreference = displayGlucosePreference
-+
+
 +        deviceDataManager.instantiateDeviceManagers()
 +        // Publish the restored devices and insulin type, replacing any snapshot made before they were ready.
 +        settingsManager.storeSettings()
-
++
          SharedLogging.instance = loggingServicesManager
 
+         criticalEventLogExportManager.scheduleCriticalEventLogHistoricalExportBackgroundTask()
+diff --git a/Loop/Managers/RemoteDataServicesManager.swift b/Loop/Managers/RemoteDataServicesManager.swift
+index b28583fb..c4448f8e 100644
 --- a/Loop/Managers/RemoteDataServicesManager.swift
 +++ b/Loop/Managers/RemoteDataServicesManager.swift
-@@ -70,6 +70,7 @@
+@@ -70,6 +70,7 @@ final class RemoteDataServicesManager {
          lock.withLock {
              unlockedRemoteDataServices.append(remoteDataService)
          }
@@ -25,3 +30,13 @@
      }
 
      func removeService(_ remoteDataService: RemoteDataService) {
+@@ -344,7 +345,8 @@ extension RemoteDataServicesManager {
+             let previousQueryAnchor = UserDefaults.appGroup?.getQueryAnchor(for: remoteDataService, withRemoteDataType: .dose) ?? InsulinDeliveryStore.QueryAnchor()
+             var continueUpload = false
+
+-            self.insulinDeliveryStore.executeDoseQuery(fromQueryAnchor: previousQueryAnchor, limit: remoteDataService.doseDataLimit ?? Int.max) { result in
++            self.insulinDeliveryStore.executeDoseQuery(fromQueryAnchor: previousQueryAnchor, limit: remoteDataService.doseDataLimit ?? Int.max,
++                                                       includeOtherApps: remoteDataService.doseDataIncludesOtherApps) { result in
+                 switch result {
+                 case .failure(let error):
+                     self.log.error("Error querying dose data: %{public}@", String(describing: error))
