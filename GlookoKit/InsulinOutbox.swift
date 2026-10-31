@@ -1,6 +1,6 @@
 import Foundation
 
-/// Delivered insulin reported as Glooko insulin entries with no medication (research/glooko/app-write-protocol.md).
+/// Delivered insulin reported as Glooko insulin entries with no medication (`PUT /api/v2/insulins`, answered with 204).
 /// `medicationGuid: null` keeps the declared basal/bolus type; naming a rapid-acting drug would turn basal into bolus,
 /// and naming a long-acting one would invent an injection. Each bolus is one entry. Basal is the delivered volume of
 /// each local clock hour, so the rate, temporary basal and suspension timeline is not represented.

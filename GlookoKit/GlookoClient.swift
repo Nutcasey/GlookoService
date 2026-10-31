@@ -3,7 +3,8 @@ import Foundation
 import FoundationNetworking
 #endif
 
-/// Glooko patient-app API, as captured from Glooko iOS 6.17.2 (research/glooko/app-write-protocol.md).
+/// Glooko's patient-app session API, as observed from Glooko iOS 6.17.2 traffic. It is undocumented, so every
+/// write is confirmed by reading it back.
 /// Writes are upserts keyed on a client-generated `guid`; a delete is the same record with `softDeleted: 1`.
 public final class GlookoClient: @unchecked Sendable {
     public struct Region: Sendable {

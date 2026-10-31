@@ -1,6 +1,7 @@
 import Foundation
 
-/// Builders for the record shapes the Glooko app sends (see research/glooko/app-write-protocol.md).
+/// Builders for the record shapes the Glooko app sends. A clinical `timestamp` is local wall-clock time written
+/// with a literal `Z` (back-dated test entries confirmed this); `updatedAt` sync cursors are true UTC.
 public enum GlookoRecords {
     public static func newGuid() -> String { UUID().uuidString }
 

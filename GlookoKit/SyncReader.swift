@@ -1,7 +1,7 @@
 import Foundation
 
-/// Strict reader for the app's SSV2 paged sync (`lastUpdatedAt` + `lastGuid` cursor), per
-/// research/glooko/pump-upload-validation-plan.md stage 1. Never reports "empty" unless every page decoded.
+/// Strict reader for the app's SSV2 paged sync (`lastUpdatedAt` + `lastGuid` cursor). A failed, malformed or
+/// non-advancing page is reported as such and never read as empty; no cursor moves past it.
 public enum ScanOutcome: Equatable, CustomStringConvertible {
     case requestFailed(status: Int, detail: String)
     case invalidResponse(String)
