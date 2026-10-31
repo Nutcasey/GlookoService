@@ -65,8 +65,7 @@ final class AuthenticationTests: XCTestCase {
         _ = try await c.get("/api/v2/users")
         _ = try await c.put(resource: "insulins", records: [])
         _ = try await c.put(resource: "foods", records: [])
-        _ = try await c.uploadDeviceFile(Data("synthetic legacy file".utf8))
-        XCTAssertEqual(AuthenticationProtocol.count, 5)
+        XCTAssertEqual(AuthenticationProtocol.count, 4)
     }
     func testSignInRotatesHostsAndBodyShapesAndUsesOnlyTheIssuedSessionCookie() async throws {
         let c = client { [secret] request, index in

@@ -10,7 +10,7 @@ struct ReportingContext: Codable, Equatable {
     var sourceName: String
     var timeZoneIdentifier: String
     var controllerTimeZoneIdentifier: String?
-    var settings: IBFPumpSettings?
+    var settings: TherapySettings?
     var problem: String?
     var insulinName: String?
 
@@ -68,7 +68,7 @@ struct ReportingContext: Codable, Equatable {
             return
         }
         let mgdl = LoopUnit.milligramsPerDeciliter
-        let therapy = IBFPumpSettings(
+        let therapy = TherapySettings(
             basal: values(basal.items, { $0 }), carbRatio: values(ratio.items, { $0 }),
             sensitivityMGDL: values(sensitivity.items, { LoopQuantity(unit: sensitivity.unit, doubleValue: $0).doubleValue(for: mgdl) }),
             targetMGDL: values(target.items, { LoopQuantity(unit: target.unit, doubleValue: $0.minValue).doubleValue(for: mgdl) }),
@@ -77,7 +77,7 @@ struct ReportingContext: Codable, Equatable {
             minimumGlucoseMGDL: threshold.quantity.doubleValue(for: mgdl),
             glucoseDisplayMMOL: stored.bloodGlucoseUnit?.unitString.lowercased().contains("mol") == true)
         do { try therapy.validate(); settings = therapy }
-        catch { problem = "Loop therapy settings cannot be represented in this pump format" }
+        catch { problem = "Loop therapy settings are outside the supported ranges" }
     }
 
     func hasSameConfiguration(as other: ReportingContext) -> Bool {

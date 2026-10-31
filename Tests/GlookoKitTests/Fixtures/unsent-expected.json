@@ -1,0 +1,20 @@
+{
+  "due" : [
+    {
+      "guid" : "D86E3F20-AF34-53CA-88DC-97EB7643ECD7",
+      "kind" : "basal",
+      "start" : 1792945020,
+      "units" : 0.29299999999999998
+    },
+    {
+      "guid" : "C46F2890-EA60-5EDD-9B2D-0464FA174AD9",
+      "kind" : "bolus",
+      "start" : 1792945241,
+      "units" : 5.8499999999999996
+    }
+  ],
+  "historyStart" : 1792945020,
+  "now" : 1792960200,
+  "reportingStart" : 1792945020,
+  "submittedBoundary" : null
+}

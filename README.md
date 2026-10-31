@@ -385,7 +385,7 @@ Neither option touches data in Glooko or Loop's own records. Turning off **Send 
 - **Not uploaded:** manual injections, meal descriptions, insulin concentrations and catalogue medication links.
 - **Not supported:** other Glooko regions, two-step sign-in and a supported public OAuth write route.
 
-Earlier versions sent insulin through a virtual Omnipod/IBF route. **The current service doesn't use that route.** The remaining Omnipod/IBF code only reads old stored history and handles migration:
+Earlier versions sent insulin through a virtual Omnipod pump-file route. **The current service doesn't use that route,** and its file encoder, ingestion checks and repair code have been removed. What remains (`PumpHistoryLog`, `LegacyPumpHistory.swift`) only decodes old stored history so existing installations can migrate:
 
 - Insulin cut-over starts where the old route stopped, or at its unsent history start, so the same delivery isn't counted twice.
 - Older native pump records keep their original labels and may appear in Glooko under *Insulet Omnipod System*.
@@ -400,6 +400,7 @@ Earlier versions sent insulin through a virtual Omnipod/IBF route. **The current
 | `GlookoKit/CarbOutbox.swift` | Food identities, changes, deletion, confirmation and older meal migration |
 | `GlookoKit/GlookoClient.swift`, `SyncReader.swift` | Session transport and complete paginated reads |
 | `GlookoKit/SyncHealth.swift`, `SyncDiagnostics.swift` | Alert state and bounded diagnostic history |
+| `GlookoKit/PumpHistoryLog.swift`, `LegacyPumpHistory.swift` | Account record and the retired route's saved history, decoded for the one-time insulin cut-over |
 | `GlookoServiceKit/ReportingContext.swift` | LoopKit dose and settings adapter, source identity and recorded insulin name |
 | `GlookoServiceKit/GlookoService.swift` | Lifecycle, account binding, history loading, send scheduling and credential recovery |
 | `GlookoServiceKitUI/GlookoService+UI.swift` | Sign-in, status screen, status header and the shared warning style |

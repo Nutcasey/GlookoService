@@ -59,20 +59,6 @@ final class InsulinOutboxTests: XCTestCase {
         XCTAssertTrue(legacy.due.isEmpty)
     }
 
-    /// History committed locally but never submitted has not reached Glooko and must still be reported.
-    func testCutOverStartsAtTheSubmittedBoundaryAndNeverDropsUnsubmittedHistory() {
-        var log = PumpHistoryLog.newIdentity()
-        log.historyStart = hour
-        log.ingest(created: [bolus("unsent", 10, 1), temp("unsent-basal", 0, 120, 0)])
-        log.commit(now: at(180), timeZone: TimeZone(identifier: "UTC")!)
-        XCTAssertNotNil(log.committedThrough)
-        XCTAssertNil(log.submittedBoundary)
-        var outbox = InsulinOutbox.cutOver(from: log, now: at(180))
-        XCTAssertEqual(outbox.reportingStart, hour)
-        outbox.refresh(now: at(180), utcOffset: utc)
-        XCTAssertEqual(outbox.due.map(\.units), [1])
-    }
-
     /// A pulse split across two hours keeps its measured volume, and whole and partial hours never share an identity.
     func testHoursPreserveMeasuredVolumeAndPartialHoursHaveTheirOwnIdentity() {
         var whole = InsulinOutbox(reportingStart: hour)

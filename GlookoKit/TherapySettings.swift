@@ -1,7 +1,7 @@
 import Foundation
 
 /// Therapy values supplied by Loop. No clinical defaults are inferred by the reporting device.
-public struct IBFPumpSettings: Codable, Equatable, Sendable {
+public struct TherapySettings: Codable, Equatable, Sendable {
     public var basal: [Double]
     public var carbRatio: [Double]
     public var sensitivityMGDL: [Double]
@@ -31,7 +31,7 @@ public struct IBFPumpSettings: Codable, Equatable, Sendable {
               maximumBasal.isFinite, maximumBasal >= (basal.max() ?? 0), maximumBasal < 1000,
               minimumGlucoseMGDL.isFinite, minimumGlucoseMGDL > 0, minimumGlucoseMGDL < 65535,
               insulinActionMinutes > 0, insulinActionMinutes <= 1440 else {
-            throw PumpHistoryIBF.EncodingError.invalidSettings
+            throw GlookoError.requestRejected("Loop therapy settings are outside the supported ranges")
         }
     }
 }

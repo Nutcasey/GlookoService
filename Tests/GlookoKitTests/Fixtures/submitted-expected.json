@@ -1,0 +1,26 @@
+{
+  "due" : [
+    {
+      "guid" : "E4D722CD-397D-58FF-8FE9-0B95AF1F50BE",
+      "kind" : "basal",
+      "start" : 1792949157,
+      "units" : 0.45500000000000002
+    },
+    {
+      "guid" : "4AB2A3DA-783E-5457-A62B-21E905927EDD",
+      "kind" : "basal",
+      "start" : 1792951200,
+      "units" : 0.80100000000000005
+    },
+    {
+      "guid" : "54840C13-6E1B-53DF-8A71-877D8352388F",
+      "kind" : "bolus",
+      "start" : 1792953600,
+      "units" : 2.1000000000000001
+    }
+  ],
+  "historyStart" : 1792945020,
+  "now" : 1792963800,
+  "reportingStart" : 1792949157,
+  "submittedBoundary" : 1792949157
+}
