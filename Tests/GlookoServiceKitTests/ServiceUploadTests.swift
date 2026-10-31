@@ -130,6 +130,40 @@ final class ServiceUploadTests: XCTestCase {
                 softwareVersion: nil, localIdentifier: nil, udiDeviceIdentifier: nil))
     }
 
+    /// Clocks went back in Europe/London on 25 October 2026, repeating 01:00-01:59. Another uploader also
+    /// holds a different value at one minute. Neither may stop the readings around them reaching Glooko.
+    func testTheRepeatedHourAndAnotherSourcesReadingAreSkippedWithoutStallingGlucose() async throws {
+        let saved = NSTimeZone.default
+        NSTimeZone.default = TimeZone(identifier: "Europe/London")!
+        defer { NSTimeZone.default = saved }
+        let fallBack = Date(timeIntervalSince1970: 1_792_887_600) // 00:20 UTC, 01:20 BST
+        let service = try await signedIn(historyStart: fallBack.addingTimeInterval(-60))
+        service.configureUploads(insulin: false, cellular: true)
+        let samples = stride(from: 0, to: 7500, by: 300).map { offset in
+            StoredGlucoseSample(syncIdentifier: "dst-\(offset)", startDate: fallBack.addingTimeInterval(TimeInterval(offset)),
+                quantity: LoopQuantity(unit: .milligramsPerDeciliter, doubleValue: 100 + Double(offset / 300)),
+                device: HKDevice(name: "G7", manufacturer: "Dexcom", model: "G7", hardwareVersion: nil, firmwareVersion: nil,
+                                 softwareVersion: nil, localIdentifier: nil, udiDeviceIdentifier: nil))
+        }
+        XCTAssertEqual(samples.count, 25) // 01:20-01:55 BST, then 01:00-02:20 GMT
+        OfflineGlooko.storeGlucose(at: "25-10-2026 02:20", mgdl: 180)
+        try await service.uploadGlucoseData(samples)
+        try await service.uploadGlucoseData([])
+        try await eventually(timeout: 15) { service.summary.pendingGlucose == 0 && service.diagnostics.skippedGlucose == 9 }
+        XCTAssertNil(service.status.glucoseError)
+        XCTAssertEqual(OfflineGlooko.glucoseValues.count, 25 - 9 + 1, "Every representable reading reached Glooko once")
+        XCTAssertEqual(OfflineGlooko.glucoseValues.filter { $0 == 18000 }.count, 1, "The other uploader's value is left alone")
+        let messages = service.diagnostics.state.events.filter { $0.category == "glucose skipped" }.map(\.message)
+        XCTAssertEqual(messages.count, 7, "Five repeated minutes, a count for the other three, and the Glooko conflict")
+        XCTAssertTrue(messages.contains { $0.contains("2026-10-25T02:20") && $0.contains("Glooko already has") })
+        try await service.uploadGlucoseData(Array(samples.suffix(12)))
+        try await service.uploadGlucoseData([])
+        XCTAssertEqual(service.diagnostics.skippedGlucose, 9, "A replayed page doesn't count the same readings again")
+        let restored = try XCTUnwrap(GlookoService(rawState: service.rawState)); services.append(restored)
+        XCTAssertEqual(restored.diagnostics.skippedGlucose, 9)
+        XCTAssertEqual(restored.summary.pendingGlucose, 0)
+    }
+
     func testGlucoseDefaultsOnSupportsDexcomLibreAndPersistsOffWithoutLosingPendingReadings() async throws {
         let service = try await signedIn(historyStart: start)
         service.configureUploads(insulin: false, cellular: true)
@@ -568,6 +602,13 @@ private final class OfflineGlooko: URLProtocol {
     static var glucoseValues: [Int] { access { glucose.values.compactMap { $0["glucoseValue"] as? Int } } }
     static func failNextGlucoseWrite() { access { failGlucoseWrite = true } }
     static func hideGlucoseGraph(_ hidden: Bool) { access { glucoseGraphHidden = hidden } }
+    /// A reading another uploader already sent, at a wall-clock minute ("dd-MM-yyyy HH:mm").
+    static func storeGlucose(at clock: String, mgdl: Double) {
+        let format = DateFormatter(); format.locale = Locale(identifier: "en_US_POSIX"); format.timeZone = TimeZone(secondsFromGMT: 0); format.dateFormat = "dd-MM-yyyy HH:mm"
+        let timestamp = GlookoClient.isoTimestamp(format.date(from: clock)!)
+        access { glucose[timestamp] = ["guid": UUID().uuidString, "displayTime": timestamp, "systemTime": timestamp,
+                                       "glucoseValue": Int((mgdl * 100).rounded()), "softDeleted": false] }
+    }
     static var signInCount: Int { access { signIns } }
     static func expireSessionAndRejectPassword() { access { rejectCredentials = true } }
     static func hold(_ key: String) { access { heldKey = key } }

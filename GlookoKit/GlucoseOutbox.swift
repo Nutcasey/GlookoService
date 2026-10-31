@@ -27,65 +27,119 @@ public struct SourceGlucose: Codable, Equatable, Sendable {
     }
 }
 
-/// Account-scoped, immutable CGM readings. A changed reading is never silently acknowledged as an edit:
-/// the CSV importer deduplicates existing timestamps without applying a changed value.
+/// A reading Glooko's minute-precision CSV can't represent. It is recorded and left out, so one
+/// bad minute never blocks the readings after it.
+public struct SkippedGlucose: Codable, Equatable, Sendable {
+    public enum Reason: String, Codable, Sendable {
+        /// A second instant at an occupied wall-clock minute, as in the repeated hour when clocks go back.
+        case repeatedMinute
+        /// The same instant with a different value. CSV can't correct a point once it may have been sent.
+        case changedValue
+        /// Glooko already holds a different, duplicate or incomplete reading at this minute.
+        case differentInGlooko
+    }
+    public var reading: SourceGlucose
+    public var reason: Reason
+    public var message: String {
+        switch reason {
+        case .repeatedMinute: return "Skipped a reading at \(reading.minute) (UTC offset \(reading.utcOffset / 60) min): that clock minute already holds an earlier reading"
+        case .changedValue: return "Skipped a changed reading at \(reading.minute): the original value is kept"
+        case .differentInGlooko: return "Skipped the reading at \(reading.minute): Glooko already has a different reading at that minute"
+        }
+    }
+}
+
+/// Account-scoped, immutable CGM readings. A changed reading is never silently acknowledged as an edit,
+/// because a CSV import can't correct a stored point.
 public struct GlucoseOutbox: Codable, Equatable, Sendable {
     public struct Entry: Codable, Equatable, Sendable {
         public var reading: SourceGlucose
         public var confirmed: Bool = false
         /// Nil is a legacy queue: a previously attempted request cannot be ruled out.
         public var submitted: Bool? = nil
+        /// Set when Glooko holds a different reading at this minute. The minute stays occupied so
+        /// replays are ignored, and the entry is no longer due.
+        public var skipped: SkippedGlucose.Reason? = nil
+    }
+    public struct StageResult: Equatable, Sendable {
+        public var skipped: [SkippedGlucose] = []
+        public var invalid = 0
+        public init() {}
     }
     public private(set) var entries: [String: Entry] = [:]
+    /// Skipped readings by source ID, kept for the same retention window as confirmed readings.
+    public private(set) var skipped: [String: SkippedGlucose] = [:]
     public var historyStart: Date?
     public init(historyStart: Date?) { self.historyStart = historyStart }
 
-    private enum CodingKeys: String, CodingKey { case entries, historyStart }
+    private enum CodingKeys: String, CodingKey { case entries, skipped, historyStart }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         entries = try values.decode([String: Entry].self, forKey: .entries)
+        skipped = try values.decodeIfPresent([String: SkippedGlucose].self, forKey: .skipped) ?? [:]
         historyStart = try values.decodeIfPresent(Date.self, forKey: .historyStart)
         for (key, entry) in entries {
             try entry.reading.validate()
             guard key == entry.reading.minute else { throw GlookoError.invalidResponse }
         }
+        for (key, skip) in skipped {
+            try skip.reading.validate()
+            guard key == skip.reading.id else { throw GlookoError.invalidResponse }
+        }
     }
 
-    public mutating func stage(_ readings: [SourceGlucose]) throws {
-        var staged = self
+    /// Never throws for a single reading: invalid and unrepresentable readings are counted or recorded
+    /// and the rest of the page is staged.
+    @discardableResult
+    public mutating func stage(_ readings: [SourceGlucose]) -> StageResult {
+        var result = StageResult()
         for reading in readings.sorted(by: { $0.priority == $1.priority ? $0.date < $1.date : $0.priority > $1.priority }) {
-            try reading.validate()
-            if let start = historyStart, reading.date < start, staged.entries[reading.minute] == nil { continue }
-            if let old = staged.entries[reading.minute] {
+            guard (try? reading.validate()) != nil else { result.invalid += 1; continue }
+            if skipped[reading.id] != nil { continue }
+            if let start = historyStart, reading.date < start, entries[reading.minute] == nil { continue }
+            if let old = entries[reading.minute] {
                 // HealthKit may replay the same sensor sample under another UUID. Do not make a second
-                // point, but reject different instants in a repeated DST minute or a conflicting value.
+                // point. A different instant at the same clock minute (the repeated hour when clocks go
+                // back) can't be told apart in CSV, so the earlier reading wins and this one is skipped.
                 guard abs(old.reading.date.timeIntervalSince(reading.date)) < 60,
                       old.reading.utcOffset == reading.utcOffset else {
-                    throw GlookoError.requestRejected("Two glucose readings conflict at \(reading.minute). CSV cannot correct or distinguish them; review the original readings.")
+                    result.skipped.append(skip(reading, .repeatedMinute)); continue
                 }
                 // Manufacturer apps and direct BLE integrations can publish different copies within one
                 // minute. Prefer the directly received measurement, keeping already reported values.
                 if reading.priority < old.reading.priority { continue }
                 if reading.priority > old.reading.priority {
-                    if !old.confirmed && old.submitted == false {
-                        staged.entries[reading.minute] = Entry(reading: reading, submitted: false)
+                    if !old.confirmed && old.submitted == false && old.skipped == nil {
+                        entries[reading.minute] = Entry(reading: reading, submitted: false)
                     }
                     continue // A possibly submitted copy is immutable, including after a restart.
                 }
-                guard old.reading.encodedValue == reading.encodedValue else {
-                    throw GlookoError.requestRejected("Two glucose readings conflict at \(reading.minute). CSV cannot correct them; review the original readings.")
-                }
-            } else { staged.entries[reading.minute] = Entry(reading: reading, submitted: false) }
+                if old.reading.encodedValue != reading.encodedValue { result.skipped.append(skip(reading, .changedValue)) }
+            } else { entries[reading.minute] = Entry(reading: reading, submitted: false) }
         }
-        self = staged
+        return result
+    }
+
+    private mutating func skip(_ reading: SourceGlucose, _ reason: SkippedGlucose.Reason) -> SkippedGlucose {
+        let record = SkippedGlucose(reading: reading, reason: reason)
+        skipped[reading.id] = record
+        return record
     }
 
     public var due: [SourceGlucose] {
-        entries.values.filter { !$0.confirmed }.map(\.reading).sorted { $0.date < $1.date }
+        entries.values.filter { !$0.confirmed && $0.skipped == nil }.map(\.reading).sorted { $0.date < $1.date }
     }
     public mutating func confirm(_ reading: SourceGlucose) {
         guard entries[reading.minute]?.reading == reading else { return }
         entries[reading.minute]?.confirmed = true
+    }
+
+    /// Glooko already holds something else at this minute. Stop sending the reading and record why.
+    @discardableResult
+    public mutating func skipDifferentInGlooko(_ reading: SourceGlucose) -> SkippedGlucose? {
+        guard entries[reading.minute]?.reading == reading, entries[reading.minute]?.confirmed == false else { return nil }
+        entries[reading.minute]?.skipped = .differentInGlooko
+        return skip(reading, .differentInGlooko)
     }
 
     public mutating func markSubmitted(_ readings: [SourceGlucose]) {
@@ -97,7 +151,8 @@ public struct GlucoseOutbox: Codable, Equatable, Sendable {
     /// Glooko keeps the imported history. Bound phone storage and future replay, while retaining every
     /// unconfirmed reading even if an outage lasts longer than the normal retention window.
     public mutating func pruneConfirmed(before cutoff: Date) {
-        entries = entries.filter { !$0.value.confirmed || $0.value.reading.date >= cutoff }
+        entries = entries.filter { !($0.value.confirmed || $0.value.skipped != nil) || $0.value.reading.date >= cutoff }
+        skipped = skipped.filter { $0.value.reading.date >= cutoff }
         historyStart = max(historyStart ?? cutoff, cutoff)
     }
 
@@ -149,28 +204,34 @@ public struct GlucoseVerification: Codable, Equatable, Sendable {
     public var verified: Bool { expected == matchedStored && expected == matchedGraphed && duplicates == 0 }
 }
 
+public struct GlucoseSubmission: Equatable, Sendable {
+    public var confirmed: [SourceGlucose] = []
+    /// Glooko already holds a different, duplicate or incomplete reading at these minutes. Nothing was
+    /// uploaded for them.
+    public var differentInGlooko: [SourceGlucose] = []
+    public init() {}
+}
+
 public extension GlookoClient {
-    /// Skip existing matching CGM points, reject conflicts, then verify both records and graphs.
-    func submitGlucose(_ readings: [SourceGlucose]) async throws -> [SourceGlucose] {
-        guard !readings.isEmpty else { return [] }
+    /// Skip existing matching CGM points, set aside conflicting minutes, then verify both records and graphs.
+    func submitGlucose(_ readings: [SourceGlucose]) async throws -> GlucoseSubmission {
+        guard !readings.isEmpty else { return .init() }
         for reading in readings { try reading.validate() }
         let before = try await glucoseState(readings)
-        var confirmed: [SourceGlucose] = [], pending: [SourceGlucose] = []
+        var result = GlucoseSubmission(), pending: [SourceGlucose] = []
         for reading in readings {
             if before.stored[reading.minute]?.isEmpty == false || before.graph[reading.minute]?.isEmpty == false {
-                guard Self.glucoseMatches(reading, before) else {
-                    throw GlookoError.requestRejected("Glooko has a different, duplicate or incomplete glucose reading at \(reading.minute). No replacement was uploaded.")
-                }
-                confirmed.append(reading)
+                if Self.glucoseMatches(reading, before) { result.confirmed.append(reading) }
+                else { result.differentInGlooko.append(reading) }
             } else { pending.append(reading) }
         }
-        guard !pending.isEmpty else { return confirmed }
+        guard !pending.isEmpty else { return result }
         try Task.checkCancellation()
-        let result = try await send("POST", host: region.dataHost,
+        let upload = try await send("POST", host: region.dataHost,
             path: "/api/v3/device/file/upload?extractorName=LibreviewCSV",
             body: GlucoseOutbox.csv(pending), authenticated: true,
             headers: ["Content-Type": "application/octet-stream"])
-        try requireGlucoseSuccess(result)
+        try requireGlucoseSuccess(upload)
         var matched: [SourceGlucose] = []
         for delay in [0, 1, 2, 4] {
             if delay > 0 { try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000) }
@@ -179,7 +240,8 @@ public extension GlookoClient {
             matched = pending.filter { Self.glucoseMatches($0, state) }
             if matched.count == pending.count { break }
         }
-        return confirmed + matched
+        result.confirmed += matched
+        return result
     }
 
     /// GETs only, including values previously acknowledged before this app launch.

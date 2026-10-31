@@ -217,7 +217,7 @@ Diagnostics are grouped by data type:
   - From the last check: entries **matched**, **missing** or **different** in Glooko.
 - **Glucose:**
   - From Loop: when readings last arrived from Loop, and whether its history has finished loading.
-  - Sending: last confirmed and waiting.
+  - Sending: last confirmed, waiting, and readings **skipped** in the last 14 days because Glooko can't represent them.
   - From the last check: readings **expected**, **stored** and **shown on Glooko graphs**, plus **duplicate minutes**.
 - **Carbs and settings:** the last carb confirmed, carbs waiting, and when Loop last delivered therapy settings and finished loading them.
 - **Recent activity:** the last 250 events, kept for up to 48 hours. Requests record only the address, result, time taken and size. Headers, query parameters, bodies, passwords and cookies are never recorded.
@@ -274,7 +274,7 @@ Insulin and carb confirmations fall back to a complete read when an already acce
 3. It sends the missing ones as a LibreView-format CSV.
 4. A reading is confirmed only when it appears in **both** Glooko's stored CGM records and its graph data.
 
-Replaying an accepted reading doesn't create another copy. A conflicting or duplicate minute is reported for review, not overwritten.
+Replaying an accepted reading doesn't create another copy. A reading that can't be represented is skipped, logged in **Recent activity** and counted in Diagnostics; the readings around it carry on. That covers the repeated hour when clocks go back (the first reading at each minute is kept), a changed value for a reading already queued, and a minute where Glooko already holds a different reading, which is never overwritten.
 
 Before a glucose request starts, its readings are marked as potentially submitted in the saved queue. A later direct-sensor copy can replace a manufacturer-app copy only before submission. Once submission is possible, the original value is retained, including after cancellation or restart.
 
@@ -348,7 +348,7 @@ Glooko [distinguishes device-delivered from manually entered insulin](https://su
 | On Wi-Fi only and nothing moves | Wait for Wi-Fi or turn on **Use mobile data**. Low Data Mode is never used |
 | Sent but not confirmed | The entry stays waiting. Check Recent activity; an HTTP success alone isn't enough |
 | Glucose shows as Abbott/CSV with a Dexcom | Expected: the CSV route can't keep the native sensor identity |
-| Glucose waiting, or a conflicting minute | Check history loading, network and Diagnostics. A different or duplicate reading in Glooko isn't overwritten; check for other uploaders |
+| Glucose waiting, or readings skipped | Check history loading, network and Diagnostics. Skipped readings are listed in Recent activity. A different reading already in Glooko isn't overwritten; check for other uploaders |
 | Food visible but Diet empty | Standalone carb foods appear in Daily log and graphs without filling the Diet panel |
 | Older summaries differ | Check the date range and older imported sources. This plugin doesn't certify or repair historical Glooko summaries |
 
@@ -380,7 +380,7 @@ Neither option touches data in Glooko or Loop's own records. Turning off **Send 
 - **Travel and clock changes:** queued insulin and carbs retain their original reporting offsets through retries, edits and restarts. Older queued entries recover their existing Glooko timestamps before an edit or resend; a failed migration leaves them unchanged. Travel before Loop recorded a time-zone context, and repeated CSV clock minutes, cannot be fully reconstructed.
 - **How far back:** only history Loop still holds, plus locally kept upload records, can be recovered. The insulin and glucose queues keep about 14 days and protect unconfirmed work. On upgrading an older pruned insulin cache, the partial day at its previous retention boundary is preserved as recorded rather than recomputed from possibly missing doses. Earlier incorrect remote data cannot be reconstructed from source intervals that were already discarded.
 - **Other uploaders:** records already imported stay in Glooko. Data from separately connected uploaders isn't deduplicated against these entries.
-- **Glucose CSV:** times are to the minute. Corrections, and repeated clock minutes with different offsets, can't be represented safely; a conflict stops confirmation for that page. Values are sent to 0.01 mg/dL, and the originals stay in local storage.
+- **Glucose CSV:** times are to the minute. Corrections, and repeated clock minutes with different offsets, can't be represented safely, so those readings are skipped and recorded rather than blocking the page. Values are sent to 0.01 mg/dL, and the originals stay in local storage.
 - **Glucose source label:** glucose shows as Abbott/CSV in Glooko, even for Dexcom. No route that keeps the native source has been found: the patient API's CGM PUT route returned "Not available".
 - **Not uploaded:** manual injections, meal descriptions, insulin concentrations and catalogue medication links.
 - **Not supported:** other Glooko regions, two-step sign-in and a supported public OAuth write route.
@@ -396,7 +396,7 @@ Earlier versions sent insulin through a virtual Omnipod/IBF route. **The current
 | Path | Role |
 |---|---|
 | `GlookoKit/InsulinOutbox.swift` | Delivered-volume totals, saved insulin queue, names, amendments and exact readback |
-| `GlookoKit/GlucoseOutbox.swift` | Saved CGM queue, replay and conflict checks, CSV sending, record and graph readback |
+| `GlookoKit/GlucoseOutbox.swift` | Saved CGM queue, replay checks, skipped readings, CSV sending, record and graph readback |
 | `GlookoKit/CarbOutbox.swift` | Food identities, changes, deletion, confirmation and older meal migration |
 | `GlookoKit/GlookoClient.swift`, `SyncReader.swift` | Session transport and complete paginated reads |
 | `GlookoKit/SyncHealth.swift`, `SyncDiagnostics.swift` | Alert state and bounded diagnostic history |

@@ -87,6 +87,7 @@ struct DiagnosticsView: View {
                     row("Loop history loaded", model.data.glucoseQueryDrained ? "Yes" : "No")
                     row("Last confirmed", time(model.snapshot.status.lastGlucoseConfirmedAt))
                     row("Waiting to confirm", String(model.data.pendingGlucose))
+                    row("Skipped (last 14 days)", String(model.data.skippedGlucose)).accessibilityIdentifier("glooko-glucose-skipped")
                     if let glucose = model.data.state.lastInspection?.glucose {
                         row("Expected in Glooko", String(glucose.expected))
                         row("Stored in Glooko", String(glucose.matchedStored))

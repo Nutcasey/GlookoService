@@ -950,23 +950,27 @@ public final class GlookoService: Service {
                     return due
                 }
                 guard !batch.isEmpty else { return }
-                let confirmed: [SourceGlucose]
+                let submission: GlucoseSubmission
                 queue.sync { recordDiagnostic("glucose", "Checking \(batch.count) readings, \(batch.first!.minute) through \(batch.last!.minute)") }
-                do { confirmed = try await transport.submitGlucose(batch) }
+                do { submission = try await transport.submitGlucose(batch) }
                 catch GlookoError.authenticationRequired {
                     transport = try await authenticatedClient(generation, replacing: transport)
                     try check(generation)
-                    confirmed = try await transport.submitGlucose(batch)
+                    submission = try await transport.submitGlucose(batch)
                 }
                 try check(generation)
+                let confirmed = submission.confirmed
                 try queue.sync {
                     guard lifecycle == generation, glucoseTaskID == id, !deleted, glucoseEnabled, var outbox = glucose else { throw CancellationError() }
                     for reading in confirmed { outbox.confirm(reading) }
+                    let skipped = submission.differentInGlooko.compactMap { outbox.skipDifferentInGlooko($0) }
                     outbox.pruneConfirmed(before: Date().addingTimeInterval(-14 * 86400))
                     try saveGlucose(outbox); glucose = outbox
                     currentStatus.glucoseError = nil
                     currentStatus.glucoseDetail = "\(confirmed.count) of \(batch.count) readings verified in Glooko records and graphs"
+                        + (skipped.isEmpty ? "" : "; \(skipped.count) skipped")
                     recordDiagnostic("glucose", "\(confirmed.count) of \(batch.count) readings verified in stored records and graphs")
+                    recordSkippedGlucose(skipped)
                     if !confirmed.isEmpty {
                         currentStatus.lastGlucoseConfirmedAt = Date()
                         let latest = confirmed.map(\.date).max()!
@@ -975,10 +979,16 @@ public final class GlookoService: Service {
                     }
                 }
                 changed()
-                if confirmed.count < batch.count { return }
+                if confirmed.count + submission.differentInGlooko.count < batch.count { return }
             }
         } catch is CancellationError { }
         catch { queue.sync { if lifecycle == generation, !deleted { currentStatus.glucoseError = "Glucose not confirmed: \(GlookoClient.errorDescription(error))"; recordDiagnostic("glucose error", GlookoClient.errorDescription(error)) } } }
+    }
+
+    /// Called on the state queue. A few individual minutes, then a count, keeps Recent activity readable.
+    private func recordSkippedGlucose(_ skipped: [SkippedGlucose]) {
+        for skip in skipped.prefix(5) { recordDiagnostic("glucose skipped", skip.message) }
+        if skipped.count > 5 { recordDiagnostic("glucose skipped", "\(skipped.count - 5) more readings skipped") }
     }
 
     public func sendTestAlert() {
@@ -1053,6 +1063,8 @@ public final class GlookoService: Service {
         public var pendingCarbs: Int
         public var pendingDoses: Int
         public var pendingGlucose: Int
+        /// Readings left out in the retention window because Glooko can't represent them.
+        public var skippedGlucose: Int
         public var glucoseQueryDrained: Bool
         public var latestSourceDose: Date?
         public var nextPumpAttempt: Date?
@@ -1064,7 +1076,7 @@ public final class GlookoService: Service {
                 doseQueryDrained: doseQueryDrained, settingsQueryDrained: settingsQueryDrained,
                 pendingCarbs: carbs?.due.count ?? 0,
                 pendingDoses: insulin?.due.count ?? 0, pendingGlucose: glucose?.due.count ?? 0,
-                glucoseQueryDrained: glucoseQueryDrained, latestSourceDose: insulin?.doses.values.map(\.start).max(),
+                skippedGlucose: glucose?.skipped.count ?? 0, glucoseQueryDrained: glucoseQueryDrained, latestSourceDose: insulin?.doses.values.map(\.start).max(),
                 nextPumpAttempt: currentStatus.lastAttemptAt?.addingTimeInterval(uploadInterval))
         }
     }
@@ -1270,11 +1282,13 @@ extension GlookoService: RemoteDataService {
                         utcOffset: TimeZone.current.secondsFromGMT(for: sample.startDate),
                         origin: sample.provenanceIdentifier == StoredGlucoseSample.defaultProvenanceIdentifier || sample.provenanceIdentifier == Bundle.main.bundleIdentifier ? .directSensor : .manufacturerApp)
                 }
-                try outbox.stage(readings)
+                let staged = outbox.stage(readings)
                 try saveGlucose(outbox); glucose = outbox
                 glucoseQueryDrained = stored.isEmpty
                 diagnosticState.lastGlucoseCallback = Date()
                 recordDiagnostic("source", "Glucose callback: \(stored.count) received, \(readings.count) eligible; drained \(glucoseQueryDrained)")
+                if staged.invalid > 0 { recordDiagnostic("glucose skipped", "Skipped \(staged.invalid) invalid readings from Loop") }
+                recordSkippedGlucose(staged.skipped)
             }
             changed()
             if stored.isEmpty { Task { await sendGlucose() } }
