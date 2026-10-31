@@ -457,6 +457,8 @@ Simulated Keychain access needs a suitably signed test host; ad hoc simulator si
 
 ## Verification
 
+The **31 October 2026** review fixes passed **34 core tests** (in London, India, Nepal and Newfoundland time) and **22 iOS service integration tests** on two consecutive runs. New cases cover the repeated hour when clocks go back and a conflicting reading already in Glooko (both skipped without stalling glucose), carbs from other apps, local basal hours in a half-hour zone, the cut-over for queues saved by earlier versions, and saved pump-file histories loading as before. On the `loop` simulator, the build installed over existing saved state reported *Up to date*, showed the skipped-readings count, and sent, confirmed and deleted a Loop carb.
+
 The **30 October 2026** review repairs passed **46 core tests, 19 iOS service integration tests and eight LoopKit dose-query tests**. Coverage includes pruning and old-cache upgrades, in-flight glucose replacement, transient authentication failures, re-sign-in recovery, historical clocks, disabled-stream alerts, diagnostic redaction and source filtering. Four portable regression cases also failed against the original revision for the intended reasons.
 
 Earlier acceptance and deployment evidence, recorded on **29 October 2026**:
