@@ -1,6 +1,6 @@
 # Integrate GlookoService with Loop next-dev
 
-`GlookoService/main` targets the async APIs in **Loop and LoopKit next-dev**. It includes the next-dev port and selected-insulin labels. Use `main` for the service; do not select an older completion-handler variant.
+`GlookoService/main` targets the async APIs in **Loop and LoopKit next-dev**, and is this repository's only branch. It includes the next-dev port and selected-insulin labels; there is no older completion-handler variant.
 
 This guide covers the plugin’s workspace wiring, startup behaviour and dose-source filtering. It supplements [Loop’s build documentation](https://loopkit.github.io/loopdocs/build/overview/), which covers signing and installation.
 

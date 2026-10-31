@@ -7,7 +7,7 @@ GlookoService is a reporting plugin for [Loop](https://loopkit.github.io/loopdoc
 - **You choose what goes.** Insulin and glucose each have their own switch. Carbs are always sent.
 - **Unofficial.** It uses Glooko's patient-app session API. It is not Glooko's own uploader, and Glooko can change that API at any time.
 
-**Use `main` from this repository with Loop and LoopKit `next-dev`.**
+**Use this repository's `main` branch with Loop and LoopKit `next-dev`.**
 
 <table>
 <tr><th>Status at a glance</th><th>Dark mode</th></tr>
@@ -472,17 +472,16 @@ Earlier acceptance and deployment evidence, recorded on **29 October 2026**:
 
 The two synthetic CGM points stay in the isolated test account, because deleting individual CGM points through this importer isn't established. No synthetic glucose is sent to the clinical account.
 
-Work records with full detail:
-- [Simulator validation](.log/261029-1538-simulator-end-to-end-validation.md): the carb cycle reused one Glooko food ID through 27 g → 34 g → deletion, and all 227 existing insulin and 14 food records were unchanged.
-- [Phone deployment](.log/261029-1635-phone-deployment.md): the honest request identity, with all 20 existing insulin entries matched on the phone.
-- [Glucose deployment](.log/261029-1809-glucose-on-phone.md): at 18:07:39 GMT a read-only check matched 91 real readings in records and graphs, with 0 duplicate minutes, and 21 insulin entries.
-- [Settings redesign](.log/261029-1909-settings-ui-clarity-pass.md): what changed on each screen, how it was tested and how it was deployed.
+Further detail from those runs:
+- Simulator: the carb cycle reused one Glooko food ID through 27 g → 34 g → deletion, and all 227 existing insulin and 14 food records were unchanged.
+- Phone: the honest request identity, with all 20 existing insulin entries matched.
+- Glucose on the phone: at 18:07:39 GMT a read-only check matched 91 real readings in records and graphs, with 0 duplicate minutes, and 21 insulin entries.
 
 Tests with catalogue-linked rapid-acting insulin showed unwanted basal-to-bolus reclassification. Text-only names with no medication link kept both delivery kinds correct in raw records, graphs and the tested statistics.
 
 These checks don't certify every pump, region, background state, historical date or Glooko report. Glooko controls its own row layout; what the plugin verifies is the uploaded name and delivery data.
 
-See the [work records](.log/) for decisions and tested contracts, and the [screenshot provenance](Documentation/Screenshots/README.md) for capture details.
+See the [screenshot provenance](Documentation/Screenshots/README.md) for capture details.
 
 ## Licence and artwork
 
