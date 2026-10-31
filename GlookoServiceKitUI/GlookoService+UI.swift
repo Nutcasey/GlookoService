@@ -269,16 +269,11 @@ struct StatusView: View {
     var body: some View {
         Form {
             Section {
-                HStack(spacing: 12) {
-                    Image("Loop", bundle: Bundle(for: GlookoServiceCoordinator.self))
-                        .resizable().scaledToFit().frame(width: 44, height: 44)
-                        .clipShape(RoundedRectangle(cornerRadius: 10)).accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 3) {
-                        (Text(Image(systemName: health.symbol)).foregroundColor(health.colour) + Text(" " + health.title))
-                            .font(.headline).accessibilityLabel(health.title).accessibilityIdentifier("glooko-health")
-                        Text(model.snapshot.email ?? "Not signed in").font(.subheadline).foregroundColor(.secondary)
-                            .lineLimit(1).truncationMode(.middle)
-                    }
+                VStack(alignment: .leading, spacing: 3) {
+                    (Text(Image(systemName: health.symbol)).foregroundColor(health.colour) + Text(" " + health.title))
+                        .font(.headline).accessibilityLabel(health.title).accessibilityIdentifier("glooko-health")
+                    Text(model.snapshot.email ?? "Not signed in").font(.subheadline).foregroundColor(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
                 }
                 if let reason = model.options.authenticationRequired {
                     Text(reason).foregroundColor(.secondary)
