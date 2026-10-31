@@ -661,7 +661,7 @@ public final class GlookoService: Service {
             recordDiagnostic("source", "Excluded \(before - outbox.doses.count) doses from a simulator or unknown pump")
         }
         outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:), utcOffset: { reportingOffset(for: $0, insulin: true) })
-        outbox.prune(now: Date())
+        outbox.prune(now: Date(), utcOffset: { reportingOffset(for: $0, insulin: true) })
         if outbox != insulin { try saveInsulin(outbox) }
         guard contexts.last?.isRealPump == true || outbox.due.isEmpty == false else {
             throw ServiceError.blocked("Uploads are paused while a real pump source is unavailable")

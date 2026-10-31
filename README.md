@@ -40,7 +40,7 @@ GlookoService is a reporting plugin for [Loop](https://loopkit.github.io/loopdoc
 | Loop data | What Glooko receives | What is left out |
 |---|---|---|
 | Finished pump bolus | One delivered bolus entry, using delivered units when available | Automatic/manual distinction, recommendation details and the original programmed amount |
-| Basal and temporary basal delivery | Delivered units totalled for each clock hour | Basal-rate profiles, temporary-basal intervals, suspensions and zero-delivery hours |
+| Basal and temporary basal delivery | Delivered units totalled for each local clock hour | Basal-rate profiles, temporary-basal intervals, suspensions and zero-delivery hours |
 | Carb entry | A standalone food entry with grams and time | Meal type, food description, absorption time and other nutrition |
 | Insulin selection | A text name such as `Fiasp via Loop`, attached to each delivery | A link to Glooko's medication catalogue |
 | Sensor glucose, including direct Dexcom and Libre connections | CGM readings through Glooko's LibreView CSV importer, to the minute and 0.01 mg/dL | Native sensor attribution, trend arrows, and manual, display-only, qualified and simulator readings |
@@ -258,11 +258,11 @@ The service saves each change from Loop before acknowledging it. Nothing is lost
 
 **Insulin:**
 - **Waits for history:** preparation waits until Loop has finished delivering **both** dose and settings history. A page containing data doesn't count as finished.
-- **Boluses and basal:** finished boluses become individual entries. Basal delivery is totalled per clock hour, using measured delivered volume when available. A running or still-changing delivery holds back an unfinished hour.
+- **Boluses and basal:** finished boluses become individual entries. Basal delivery is totalled per local clock hour in Loop's therapy time zone, using measured delivered volume when available. In a half-hour zone such as India the hours run 10:00-11:00 local time, not 10:30-11:30. After travel to a zone with a different half-hour offset, one hour is shortened to reach the new local clock. Hours sent by earlier versions, which followed UTC, are left as they are. A running or still-changing delivery holds back an unfinished hour.
 - **Confirmation:** an entry stays queued until Glooko returns it with the expected identity, amount, time, delivery kind, flags and name. An accepted HTTP request alone is not confirmation.
 - **Stable identities:** a retry updates the same entry rather than creating a copy. Changes and deletions in Loop are applied to those entries. If a deleted entry is needed again, it gets a new revision, because Glooko doesn't revive a deleted ID.
 - **Source checks:** the host excludes doses from other HealthKit apps while their original provenance is still available. A connected pump alone does not establish a dose's source.
-- **Retention:** complete UTC days and their source intervals are retained together. A saved recomputation boundary prevents an older hour being recreated from partial delivery evidence.
+- **Retention:** complete local days (UTC days for hours sent by earlier versions) and their source intervals are retained together, because each day's hours are rounded from one running total. A saved recomputation boundary prevents an older hour being recreated from partial delivery evidence.
 
 **Carbs** have their own queue and retries. An edit updates the same food entry, and a deletion soft-deletes it. A failed carb upload retries without needing another change in Loop.
 
