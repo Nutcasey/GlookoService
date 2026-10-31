@@ -82,7 +82,7 @@ Loop development/
 2. Add `GlookoServiceKitPlugin` to the **LoopWorkspace** scheme's Build action.
 3. Build that scheme, so the matching LoopKit products and the plugin are built together.
 
-The host must query restored services, publish restored device metadata and pass Glooko's dose-source filter into LoopKit. The integration guide includes current Loop and LoopKit patches. Its older `dev` patch is historical.
+The host must query restored services, publish restored device metadata and pass Glooko's dose-source filter into LoopKit. Without the dose-source patches the plugin still builds, but insulin other apps saved to Apple Health is then sent as pump insulin. The integration guide includes current Loop and LoopKit patches. Its older `dev` patch is historical.
 
 Once installed, **Glooko** appears under Loop **Settings → Services → Add Service**. If it doesn't, check the workspace, the scheme and that the plugin is embedded before trying to sign in.
 
@@ -261,7 +261,7 @@ The service saves each change from Loop before acknowledging it. Nothing is lost
 - **Boluses and basal:** finished boluses become individual entries. Basal delivery is totalled per local clock hour in Loop's therapy time zone, using measured delivered volume when available. In a half-hour zone such as India the hours run 10:00-11:00 local time, not 10:30-11:30. After travel to a zone with a different half-hour offset, one hour is shortened to reach the new local clock. Hours sent by earlier versions, which followed UTC, are left as they are. A running or still-changing delivery holds back an unfinished hour.
 - **Confirmation:** an entry stays queued until Glooko returns it with the expected identity, amount, time, delivery kind, flags and name. An accepted HTTP request alone is not confirmation.
 - **Stable identities:** a retry updates the same entry rather than creating a copy. Changes and deletions in Loop are applied to those entries. If a deleted entry is needed again, it gets a new revision, because Glooko doesn't revive a deleted ID.
-- **Source checks:** the host excludes doses from other HealthKit apps while their original provenance is still available. A connected pump alone does not establish a dose's source.
+- **Source checks:** with the dose-source patches applied, the host excludes doses from other HealthKit apps while their original provenance is still available. Without them those doses reach the service and are sent; the service can't tell. A connected pump alone does not establish a dose's source.
 - **Retention:** complete local days (UTC days for hours sent by earlier versions) and their source intervals are retained together, because each day's hours are rounded from one running total. A saved recomputation boundary prevents an older hour being recreated from partial delivery evidence.
 
 **Carbs** have their own queue and retries. An edit updates the same food entry, and a deletion soft-deletes it. A failed carb upload retries without needing another change in Loop.

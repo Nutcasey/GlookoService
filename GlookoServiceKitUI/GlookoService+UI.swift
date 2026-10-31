@@ -280,7 +280,7 @@ struct StatusView: View {
                     Button("Sign in") { model.signInAgain() }
                 }
             }
-            Section(header: Text("Insulin"), footer: Text(model.options.insulinEnabled ? "Each bolus is one entry. Basal is sent as the total for each clock hour, 15 minutes after the hour ends; Glooko doesn't receive basal rates, temporary basals or suspensions. Changes made later in Loop update the same entries. Older entries may appear under ‘Insulet Omnipod System’." : "Turn on to send the basal and bolus insulin your pump delivers.")) {
+            Section(header: Text("Insulin"), footer: Text(model.options.insulinEnabled ? "Each bolus is one entry. Basal is sent as the total for each clock hour, 15 minutes after the hour ends; Glooko doesn't receive basal rates, temporary basals or suspensions. Changes made later in Loop update the same entries. Older entries may appear under ‘Insulet Omnipod System’. Insulin other apps saved to Apple Health is left out only if your Loop build includes the dose-source change in the GlookoService guide." : "Turn on to send the basal and bolus insulin your pump delivers.")) {
                 Toggle("Send insulin", isOn: Binding(get: { model.options.insulinEnabled }, set: { model.configure(insulin: $0) })).accessibilityIdentifier("glooko-insulin-enabled")
                 if model.options.insulinEnabled {
                     row("Pump", model.snapshot.summary.sourceName ?? "Waiting for a pump").accessibilityIdentifier("glooko-pump-upload-source")

@@ -53,7 +53,7 @@ The service must receive the actual pump identity and recorded insulin selection
 
 ### Filter insulin while source provenance is available
 
-Loop's dose store also reads insulin from other apps in Apple Health. A connected pump does not prove that every stored dose came from it. Glooko opts out of those external records through `RemoteDataService.doseDataIncludesOtherApps`.
+Loop's dose store also reads insulin from other apps in Apple Health. A connected pump does not prove that every stored dose came from it. Glooko opts out of those external records through `RemoteDataService.doseDataIncludesOtherApps`. That opt-out only works once Loop and LoopKit carry the two patches below; nothing in the service can detect whether they are present.
 
 Apply [next-dev-dose-provenance.patch](next-dev-dose-provenance.patch) inside **LoopKit**. It adds that public option, defaulting to `true` for existing services, and an `includeOtherApps` dose-query parameter. When `false`, the query includes only this app's records with LoopKit origin. Manual entries and simulator delivery remain excluded by Glooko's existing checks. The change filters remote reporting queries; it does not change insulin ingestion, dosing calculations or stored therapy data.
 
@@ -71,7 +71,7 @@ git apply --check /path/to/GlookoService/Documentation/Loop/next-dev-host-integr
 git apply /path/to/GlookoService/Documentation/Loop/next-dev-host-integration.patch
 ```
 
-Check your source first. If equivalent changes are already present, do not apply them twice. If another next-dev revision changes the surrounding code, review the behaviours above rather than forcing the patch. The current service requires the LoopKit source-filter option to compile.
+Check your source first. If equivalent changes are already present, do not apply them twice. If another next-dev revision changes the surrounding code, review the behaviours above rather than forcing the patch. The service builds without these two patches, but then its `doseDataIncludesOtherApps` setting has no effect: Loop passes on insulin that other apps saved to Apple Health, and Glooko receives it as if the pump had delivered it. Apply both patches for insulin reporting to be limited to Loop's own records.
 
 ## 4. Build and check
 
