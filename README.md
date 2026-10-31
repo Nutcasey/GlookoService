@@ -486,4 +486,4 @@ See the [work records](.log/) for decisions and tested contracts, and the [scree
 
 ## Licence and artwork
 
-Code is available under the [MIT licence](LICENSE). Glooko and Loop names and artwork belong to their owners. The service icon comes from Glooko's [App Store listing](https://apps.apple.com/gb/app/glooko-track-diabetes-data/id471942748). The unmodified Loop artwork notice is in [LoopArtwork-LICENSE.txt](GlookoServiceKitUI/LoopArtwork-LICENSE.txt).
+Code is available under the [MIT licence](LICENSE). Glooko and Loop names belong to their owners. The service icon comes from Glooko's [App Store listing](https://apps.apple.com/gb/app/glooko-track-diabetes-data/id471942748).

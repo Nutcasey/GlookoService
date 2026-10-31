@@ -30,7 +30,6 @@
 		845BA7DE7BF9130C727E4EE2 /* GlookoServiceKitUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D8D18557ABE513F0AD1488F /* GlookoServiceKitUI.framework */; };
 		8B34916823BA59C46AAD68BB /* GlookoServiceKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D0F3BDEDB49D12884F88E08 /* GlookoServiceKit.framework */; };
 		9096E10800AE7618A6F9C8B4 /* SyncInspection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6644DB21AF764C739D85A83F /* SyncInspection.swift */; };
-		98A658D2B71E9D1D5C647DBC /* LoopArtwork-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 96A1E7D979BC92582D5C4AE7 /* LoopArtwork-LICENSE.txt */; };
 		9A472719472E5EFFA4BCEB43 /* PumpAttribution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 358DF5D8E88247BE130A7565 /* PumpAttribution.swift */; };
 		9D65AA4D47142ED717CBBB16 /* LoopKit.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 4B7525F927564C2D84B0BCBA /* LoopKit.framework */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A3E5017B5F355E3CF2F893B9 /* GlookoCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EA4F389B78241EE11C1764F /* GlookoCredentials.swift */; };
@@ -144,7 +143,6 @@
 		787EB60716FBAADE00A586D4 /* ReportAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReportAudit.swift; sourceTree = "<group>"; };
 		78EA70D967D00898EE0E0577 /* GlookoService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlookoService.swift; sourceTree = "<group>"; };
 		79EB4DAB821E6034482C9839 /* LoopKitUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = LoopKitUI.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		96A1E7D979BC92582D5C4AE7 /* LoopArtwork-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "LoopArtwork-LICENSE.txt"; sourceTree = "<group>"; };
 		96C9531BA7197B9BEA854487 /* PumpHistoryLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PumpHistoryLog.swift; sourceTree = "<group>"; };
 		9A64B9561116988D449093C2 /* SyncDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncDiagnostics.swift; sourceTree = "<group>"; };
 		9EA4F389B78241EE11C1764F /* GlookoCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlookoCredentials.swift; sourceTree = "<group>"; };
@@ -285,7 +283,6 @@
 				3D08E50B455599FA482C5464 /* Assets.xcassets */,
 				5B2BD4FA867319F5C3B238BC /* DiagnosticsView.swift */,
 				431FFF85D52B938076630689 /* GlookoService+UI.swift */,
-				96A1E7D979BC92582D5C4AE7 /* LoopArtwork-LICENSE.txt */,
 			);
 			path = GlookoServiceKitUI;
 			sourceTree = "<group>";
@@ -474,7 +471,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				E9450BFE11D2BE09C152E534 /* Assets.xcassets in Resources */,
-				98A658D2B71E9D1D5C647DBC /* LoopArtwork-LICENSE.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

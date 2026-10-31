@@ -1,8 +1,12 @@
 # Screenshot provenance
 
-All images were captured on **29 October 2026** on the existing Device Hub simulator **loop** (iPhone 18 Pro, iOS 27.0), using `xcrun simctl io … screenshot` at native resolution (1206 × 2622). They are real GlookoService screens inside Loop. They replace the earlier set, which predated the redesigned settings screens.
+Nine images were captured on **29 October 2026**; `status.png`, `status-dark.png`, `insulin-on.png` and `alert.png` were recaptured on **31 October 2026** (see below). All were captured on the existing Device Hub simulator **loop** (iPhone 18 Pro, iOS 27.0), using `xcrun simctl io … screenshot` at native resolution (1206 × 2622). They are real GlookoService screens inside Loop. They replace the earlier set, which predated the redesigned settings screens.
 
-The app was built with Xcode 27.1 from GlookoService **`785b753`**, a clean build (the Help section shows `785b753` with no `.dirty` suffix). The host source was Loop `415926dd` plus the [documented next-dev host patch](../Loop/next-dev-host-integration.patch). The simulator uses the Pump Simulator, the CGM Simulator and synthetic Loop history. The signed-in screens use an isolated Glooko test account, with its password saved on the simulator.
+The 29 October images were built with Xcode 27.1 from GlookoService **`785b753`**, a clean build (the Help section shows `785b753` with no `.dirty` suffix). The host source was Loop `415926dd`, a commit from the separate Loop redesign PR (#2621), plus the [documented next-dev host patch](../Loop/next-dev-host-integration.patch). A strip of that PR's Now-screen buttons shows at the top edge behind the sheet; it is not part of this service. The simulator uses the Pump Simulator, the CGM Simulator and synthetic Loop history. The signed-in screens use an isolated Glooko test account, with its password saved on the simulator.
+
+### 31 October 2026 recapture
+
+The status header used to show a Loop app icon that had been copied by mistake from the Loop redesign PR. GlookoService now has no Loop artwork, and the four images that showed the header were recaptured on the same simulator. That build was GlookoService `3d0ec3f` plus this uncommitted icon removal, so the build was marked `.dirty`. The change was then committed unchanged; the Build row is not visible in these four images. The host was plain upstream Loop `next-dev` `e0eb9856` plus the documented host patch, with no redesign code. The other nine images contain no Loop icon and were left unchanged.
 
 ## Edits
 
@@ -20,10 +24,10 @@ Only one edit was made. In `status.png`, `status-dark.png`, `insulin-on.png` and
 | [services.png](services.png) | Glooko listed under Loop Settings → Services | `7244e933926f2a947ff8ea956d7b706207086fe868f41766881e3f4abd68d20f` |
 | [setup.png](setup.png) | Sign-in: account fields, saved-password option and what to send | `04943cd24da8a9e0ab0cb8c087ea4533dc3343e8a27edec949871bde9fe0a99f` |
 | [setup-options.png](setup-options.png) | Sign-in: mobile data, Sign in and Cancel | `4ff9641e9c580f20333ba19db4c3422ded9c369893e154ccbcccba03f070413d` |
-| [status.png](status.png) | Status header *Up to date*, insulin off, glucose on | `bc71eebd5c4eeae505b9187502e1f0aade1625b1ee128e5d1e79d02e89eb88ef` |
-| [status-dark.png](status-dark.png) | The same screen in dark mode | `f8ad81fe125dcb4c9869d93904df1eca61fd27f62fc69ee59dc380ce39938f6d` |
-| [insulin-on.png](insulin-on.png) | Insulin rows with the simulator-pump guard warning | `2d01889cd681df2bf37dd90c9aa56cb863aa604e42017903d76efa47a0dfb20e` |
-| [alert.png](alert.png) | The Loop alert raised when insulin can't be sent | `3e4ac33465b11e87ca802d98e3f616674a81ae28a3103edebe495186fbe00d8d` |
+| [status.png](status.png) | Status header *Up to date*, insulin off, glucose on | `8354b9ae2c3b21b9fe681201ce0eb71af08463458608022fb2c3b6325e528eb5` |
+| [status-dark.png](status-dark.png) | The same screen in dark mode | `4e924d579bb27b1c65ba924fdf9d53522125afe2559f3032c01d72542383685e` |
+| [insulin-on.png](insulin-on.png) | Insulin rows with the simulator-pump guard warning | `49fe0c4712b72b85c90ac1907e6de8139ff66e550eff571bafa166677d4787d1` |
+| [alert.png](alert.png) | The Loop alert raised when insulin can't be sent | `069dbbb946c28130c9fb7710e1483b71c16750524c8a6b7bfa21e953a1f9881c` |
 | [sending.png](sending.png) | Carbs, then Sending (Send now, mobile data, Alert after, test alert) | `efecd77358290fb1a8386289e19ffaa74c21ca080b2feefca92c49b68e710c12` |
 | [account.png](account.png) | Account, Help (diagnostics, build) and Delete | `5c43438fcac72a01cbf02ac48f51d7dc4aa327e6e298e13bbbe479b7e091c332` |
 | [delete.png](delete.png) | The delete choice: keep or erase local history | `d5567f6a676157228823afd6fe97d83e394297e346c6581ddd9e2016a09dc99b` |
