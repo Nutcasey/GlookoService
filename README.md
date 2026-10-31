@@ -41,7 +41,7 @@ GlookoService is a reporting plugin for [Loop](https://loopkit.github.io/loopdoc
 |---|---|---|
 | Finished pump bolus | One delivered bolus entry, using delivered units when available | Automatic/manual distinction, recommendation details and the original programmed amount |
 | Basal and temporary basal delivery | Delivered units totalled for each local clock hour | Basal-rate profiles, temporary-basal intervals, suspensions and zero-delivery hours |
-| Carb entry | A standalone food entry with grams and time | Meal type, food description, absorption time and other nutrition |
+| Carb entered in Loop | A standalone food entry with grams and time | Meal type, food description, absorption time and other nutrition |
 | Insulin selection | A text name such as `Fiasp via Loop`, attached to each delivery | A link to Glooko's medication catalogue |
 | Sensor glucose, including direct Dexcom and Libre connections | CGM readings through Glooko's LibreView CSV importer, to the minute and 0.01 mg/dL | Native sensor attribution, trend arrows, and manual, display-only, qualified and simulator readings |
 | Therapy settings and pump status | Used locally to identify the source, timing and insulin | Nothing: settings are not uploaded and no pump is registered in Glooko |
@@ -49,6 +49,7 @@ GlookoService is a reporting plugin for [Loop](https://loopkit.github.io/loopdoc
 What is never sent:
 - **Excluded from insulin:** manually entered insulin doses, the Pump Simulator and sources without an identifiable real pump.
 - **Excluded from glucose:** CGM Simulator readings.
+- **Excluded from carbs:** carbs other apps wrote to Apple Health.
 
 Carbs and glucose don't depend on having a real pump. Glucose comes from the readings Loop already has, so you don't need the manufacturer's app. Glooko labels these readings **Abbott/CSV**, even when they came from a Dexcom; the setup and status screens say so.
 

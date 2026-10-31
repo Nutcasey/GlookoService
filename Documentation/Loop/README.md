@@ -62,7 +62,7 @@ git apply --check /path/to/GlookoService/Documentation/Loop/next-dev-dose-proven
 git apply /path/to/GlookoService/Documentation/Loop/next-dev-dose-provenance.patch
 ```
 
-[next-dev-host-integration.patch](next-dev-host-integration.patch) contains the startup changes above and passes each service's source option into the dose query. Its current base is Loop `415926dd`; the LoopKit patch's base is `b6db6e18`. Earlier versions of the host patch contained only the startup changes. Check all three behaviours when upgrading.
+[next-dev-host-integration.patch](next-dev-host-integration.patch) contains the startup changes above and passes each service's source option into the dose query. On 31 October 2026 it applied cleanly to upstream Loop `next-dev` `e0eb9856`, and the LoopKit patch to upstream LoopKit `next-dev` `613295a1`. Earlier versions of the host patch contained only the startup changes. Check all three behaviours when upgrading.
 
 Inside the **Loop** checkout:
 
