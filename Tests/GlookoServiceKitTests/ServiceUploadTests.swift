@@ -52,9 +52,10 @@ final class ServiceUploadTests: XCTestCase {
         return service
     }
 
-    private func carb(_ grams: Double, version: Int = 1, operation: LoopKit.Operation = .create) -> SyncCarbObject {
-        SyncCarbObject(absorptionTime: nil, createdByCurrentApp: true, foodType: nil, grams: grams,
-                       startDate: start, uuid: nil, provenanceIdentifier: "offline.loop", syncIdentifier: "carb",
+    private func carb(_ grams: Double, version: Int = 1, operation: LoopKit.Operation = .create, fromLoop: Bool = true) -> SyncCarbObject {
+        SyncCarbObject(absorptionTime: nil, createdByCurrentApp: fromLoop, foodType: nil, grams: grams,
+                       startDate: start, uuid: nil, provenanceIdentifier: fromLoop ? "offline.loop" : "com.example.foodlog",
+                       syncIdentifier: fromLoop ? "carb" : "other-app-carb",
                        syncVersion: version, userCreatedDate: nil, userUpdatedDate: nil, userDeletedDate: nil,
                        operation: operation, addedDate: nil, supercededDate: nil)
     }
@@ -328,6 +329,14 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertEqual(OfflineGlooko.foodGrams, 45)
         XCTAssertGreaterThan(try XCTUnwrap(OfflineGlooko.foodReadSince), Date().addingTimeInterval(-600))
         XCTAssertGreaterThan(try XCTUnwrap(OfflineGlooko.foodReadSince), start)
+    }
+
+    func testCarbsOtherAppsWroteToHealthAreNotSent() async throws {
+        let service = try await signedIn()
+        try await stage(carb(45, fromLoop: false), in: service)
+        try await stage(carb(20), in: service)
+        try await eventually { service.summary.pendingCarbs == 0 && OfflineGlooko.foodWriteCount == 1 }
+        XCTAssertEqual(OfflineGlooko.foodGrams, 20)
     }
 
     func testUploadNowRetriesCarbsEvenWithoutAnEligiblePump() async throws {

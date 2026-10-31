@@ -4,7 +4,7 @@ GlookoService is a reporting plugin for [Loop](https://loopkit.github.io/loopdoc
 
 - **Reporting only.** It never delivers insulin, changes therapy settings or accepts remote commands.
 - **Checked, not assumed.** Every entry is read back from Glooko before Loop counts it as sent.
-- **You choose what goes.** Insulin and glucose each have their own switch. Carbs are always sent.
+- **You choose what goes.** Insulin and glucose each have their own switch. Carbs entered in Loop are always sent.
 - **Unofficial.** It uses Glooko's patient-app session API. It is not Glooko's own uploader, and Glooko can change that API at any time.
 
 **Use this repository's `main` branch with Loop and LoopKit `next-dev`.**
@@ -97,7 +97,7 @@ Open **Settings → Add Service → Glooko** and work down the screen:
 3. **What to send:**
    - **Insulin** is off by default for a new installation.
    - **Glucose** is on by default, including when upgrading from a version without it. Turn it off if something else already sends your glucose to Glooko.
-   - Carbs are always sent.
+   - Carbs entered in Loop are always sent.
 4. **Use mobile data** is off by default, so Loop waits for Wi-Fi. Low Data Mode networks are never used.
 5. **Send history from** defaults to now and goes back up to seven days, as far as Loop still has history. This option only appears on first setup.
 6. Tap **Sign in**.
@@ -164,7 +164,7 @@ Turning it back on resumes the retained work. It can't take back a reading Glook
 
 ### Carbs
 
-Carbs are always sent, soon after you save them. **Last confirmed** and **Waiting to send** show their state. Editing a carb entry in Loop updates the same Glooko food entry, and deleting it deletes that entry.
+Carbs you enter in Loop are always sent, soon after you save them. Carbs other apps wrote to Apple Health aren't sent, the same as their insulin, because they may already reach Glooko another way. **Last confirmed** and **Waiting to send** show their state. Editing a carb entry in Loop updates the same Glooko food entry, and deleting it deletes that entry.
 
 ### Sending
 

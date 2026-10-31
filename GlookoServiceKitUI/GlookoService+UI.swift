@@ -151,7 +151,7 @@ struct SignInView: View {
                 Toggle("Save password on this iPhone", isOn: $model.rememberPassword).disabled(model.busy)
                     .accessibilityIdentifier("glooko-remember-password")
             }
-            Section(header: Text("What to send"), footer: Text("Carbs are always sent. Insulin appears in Glooko as basal and bolus entries named after your insulin, such as ‘Novolog via Loop’. Glucose appears as Abbott/CSV data, even from a Dexcom. Simulator data is never sent, and nothing in Loop's therapy settings changes.")) {
+            Section(header: Text("What to send"), footer: Text("Carbs entered in Loop are always sent. Insulin appears in Glooko as basal and bolus entries named after your insulin, such as ‘Novolog via Loop’. Glucose appears as Abbott/CSV data, even from a Dexcom. Simulator data is never sent, and nothing in Loop's therapy settings changes.")) {
                 Toggle("Insulin", isOn: $model.insulinEnabled).disabled(model.busy).accessibilityIdentifier("glooko-insulin-enabled")
                 Toggle("Glucose", isOn: $model.glucoseEnabled).disabled(model.busy).accessibilityIdentifier("glooko-glucose-enabled")
             }
@@ -303,7 +303,7 @@ struct StatusView: View {
                     if let error = model.snapshot.status.glucoseError { GlookoWarning(text: error) }
                 }
             }
-            Section(header: Text("Carbs"), footer: Text("Carbs are always sent, soon after you save them. Edits and deletions update the same Glooko food entry. Find them in Glooko's graphs and history; the Diet panel may stay empty.")) {
+            Section(header: Text("Carbs"), footer: Text("Carbs entered in Loop are always sent, soon after you save them. Edits and deletions update the same Glooko food entry. Find them in Glooko's graphs and history; the Diet panel may stay empty.")) {
                 row("Last confirmed", text(model.snapshot.status.lastCarbConfirmedAt))
                 row("Waiting to send", String(model.snapshot.summary.pendingCarbs))
                 if let detail = model.snapshot.status.carbDetail { lastSend(detail) }

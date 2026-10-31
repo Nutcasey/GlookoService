@@ -1243,8 +1243,9 @@ extension GlookoService: RemoteDataService {
                 guard !self.deleted, accountID != nil else { throw ServiceError.blocked("Sign in before storing carbs") }
                 if carbs == nil, let accountID { restoreCarbs(accountID) }
                 guard var outbox = carbs else { throw ServiceError.blocked(carbStorageError ?? "Carb storage is unavailable") }
-                // Entries Glooko itself wrote to Health would come back as duplicates.
-                let source = (created + updated + deleted).filter { !$0.provenanceIdentifier.lowercased().contains("glooko") }
+                // Only carbs entered in Loop, matching insulin. Other apps' entries in Health, Glooko's own
+                // included, may already reach Glooko another way and would be counted twice.
+                let source = (created + updated + deleted).filter(\.createdByCurrentApp)
                 try outbox.stage(source.map { carb in
                     SourceCarb(id: carb.syncIdentifier ?? carb.uuid?.uuidString ?? "carb-\(carb.startDate.timeIntervalSince1970)",
                                start: carb.startDate, grams: carb.grams, version: carb.syncVersion ?? 0, deleted: carb.operation == .delete,
