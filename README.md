@@ -272,6 +272,8 @@ The service saves each change from Loop before acknowledging it. Nothing is lost
 
 If Glooko refuses a batch of insulin entries, the batch is split until the refused entry is alone. The rest are sent, and that entry is named in **Recent activity**, kept on the phone and tried again every hour, or when you tap **Send now**.
 
+Basal hours from 7 November 2026 19:00 UTC have an ID that includes a hash of the Glooko account. Earlier hours used an ID every account shared, and they keep it so that nothing already in Glooko is sent twice. If Glooko refuses a basal hour on the shared ID and doesn't hold it, that hour moves to the account's own ID.
+
 Insulin and carb confirmations fall back to a complete read when an already accepted retry falls outside the recent-update cursor. Temporary account-check failures remain retryable. Signing in again resumes retained work without requiring a new source event.
 
 **Glucose** has its own saved queue:

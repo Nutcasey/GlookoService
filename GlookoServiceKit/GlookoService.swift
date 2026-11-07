@@ -626,12 +626,20 @@ public final class GlookoService: Service {
                     result = try await transport.submitInsulin(due, timeZone: timeZone)
                 }
                 catch GlookoError.entriesRefused(let status, _) {
+                    // An ID every account shares may already be taken. Only move it once Glooko is known not to hold it.
+                    let movable = due.count == 1 && queue.sync { insulin?.canMoveToAccountID(due[0]) == true }
+                    let absent = movable ? await transport.holdsInsulin(due[0]) == false : false
                     // Glooko doesn't say which entry it objects to. Halve the batch until the entry is alone, so the rest
                     // still go. Three lone refusals with nothing accepted looks like Glooko itself failing, so wait for the next cycle.
                     let stop = queue.sync { () -> Bool in
                         guard lifecycle == generation, !deleted else { return true }
                         recordDiagnostic("insulin error", "Glooko refused \(due.count) entries (HTTP \(status))")
                         guard due.count == 1, let entry = due.first else { batchLimit = due.count / 2; return false }
+                        if absent, var outbox = insulin, outbox.moveToAccountID(entry), (try? saveInsulin(outbox)) != nil {
+                            recordDiagnostic("insulin", "Moved the basal at \(WallClock(timeZone: timeZone).string(entry.start).prefix(16)) to this account's own ID")
+                            batchLimit = 100
+                            return false
+                        }
                         insulinHeld[entry.guid] = Date().addingTimeInterval(insulinRefusalHold)
                         recordDiagnostic("insulin error", "Glooko refused the \(entry.kind.rawValue) at \(WallClock(timeZone: timeZone).string(entry.start).prefix(16)); trying again in an hour")
                         currentStatus.lastError = insulinRefusalMessage
@@ -648,7 +656,7 @@ public final class GlookoService: Service {
                     guard lifecycle == generation, !deleted, var outbox = insulin else { throw CancellationError() }
                     for entry in result.confirmed { outbox.confirm(entry); insulinHeld[entry.guid] = nil }
                     for entry in result.heldDeleted { outbox.supersede(entry) }
-                    if !result.heldDeleted.isEmpty { outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:), utcOffset: { reportingOffset(for: $0, insulin: true) }) }
+                    if !result.heldDeleted.isEmpty { outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:), utcOffset: { reportingOffset(for: $0, insulin: true) }, accountKey: accountID.map { GlookoAccount(id: $0, email: "").storageKey }) }
                     try saveInsulin(outbox)
                     currentStatus.lastUploadAt = Date(); currentStatus.verificationDetail = result.detail
                     recordDiagnostic("insulin", result.detail)
@@ -693,7 +701,7 @@ public final class GlookoService: Service {
         if outbox.doses.count < before {
             recordDiagnostic("source", "Excluded \(before - outbox.doses.count) doses from a simulator or unknown pump")
         }
-        outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:), utcOffset: { reportingOffset(for: $0, insulin: true) })
+        outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:), utcOffset: { reportingOffset(for: $0, insulin: true) }, accountKey: GlookoAccount(id: accountID, email: "").storageKey)
         outbox.prune(now: Date(), utcOffset: { reportingOffset(for: $0, insulin: true) })
         if outbox != insulin { try saveInsulin(outbox) }
         guard contexts.last?.isRealPump == true || outbox.due.isEmpty == false else {

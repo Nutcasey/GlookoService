@@ -45,10 +45,14 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
     public private(set) var entries: [String: Tracked] = [:]
     /// Glooko never revives a soft-deleted GUID, so an identity wanted again after deletion moves to a new revision.
     public private(set) var revisions: [String: Int]?
+    /// Hours Glooko refused on the ID all accounts share, which now use this account's own.
+    public private(set) var movedBasal: Set<String>?
 
     public static let bolusSettle: TimeInterval = 10 * 60
     public static let basalSettle: TimeInterval = 15 * 60
     public static let retention: TimeInterval = 14 * 86400
+    /// 7 November 2026 19:00 UTC. Earlier whole hours keep the ID every account shares, so sending one again can't duplicate it.
+    public static let accountIDsFrom = Date(timeIntervalSince1970: 1_794_078_000)
 
     public init(reportingStart: Date) {
         self.reportingStart = reportingStart; recomputeFrom = reportingStart; localHoursFrom = reportingStart
@@ -81,7 +85,7 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
 
     /// Recomputes the wanted entries. Known entries no longer wanted become deletions; unsent ones are dropped.
     public mutating func refresh(now: Date, insulinName: (SourceDose) -> String? = { $0.insulinName },
-                                 utcOffset: (Date) -> Int = { TimeZone.current.secondsFromGMT(for: $0) }) {
+                                 utcOffset: (Date) -> Int = { TimeZone.current.secondsFromGMT(for: $0) }, accountKey: String? = nil) {
         initialiseRetentionBoundary(now: now)
         initialiseLocalHours()
         let boundary = max(reportingStart, recomputeFrom ?? reportingStart)
@@ -124,11 +128,12 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
             // period beginning inside that hour can never overwrite a different quantity under the same GUID.
             let epoch = Int(hour.timeIntervalSince1970)
             let seed = from == hour ? "\(epoch)" : "\(epoch)|from:\(Int(from.timeIntervalSince1970.rounded(.down)))"
-            let resolved = identity("loop-insulin-basal|\(seed)")
+            let named = basalIdentity(seed, hour: hour, accountKey: accountKey)
+            let resolved = identity(named.seed)
             let guid = resolved.guid
             let old = entries[guid]?.current ?? resolved.previous
             wanted[guid] = Entry(guid: guid, kind: .basal, start: from, units: units, deleted: false,
-                                 externalID: "loop:basal:\(seed)", name: Self.displayName(contributions.map(\.1)),
+                                 externalID: named.externalID, name: Self.displayName(contributions.map(\.1)),
                                  utcOffset: old?.start == from ? old?.utcOffset : utcOffset(from), end: isLocal ? to : nil)
         }
         let lastHourEnd = hours.last?.end ?? reportingStart
@@ -158,6 +163,31 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
             labels.append("unknown insulin")
         }
         return labels.joined(separator: " / ") + " via Loop"
+    }
+
+    /// An hour already tracked under the shared ID stays there, so it can't be sent twice under two IDs.
+    private func basalIdentity(_ seed: String, hour: Date, accountKey: String?) -> (seed: String, externalID: String) {
+        let shared = "loop-insulin-basal|\(seed)"
+        guard let accountKey else { return (shared, "loop:basal:\(seed)") }
+        let known = entries[Self.guid(shared)] != nil || revisions?[shared] != nil
+        guard movedBasal?.contains(shared) == true || (hour >= Self.accountIDsFrom && !known) else { return (shared, "loop:basal:\(seed)") }
+        return ("loop-insulin-basal|\(accountKey)|\(seed)", "loop:basal:\(accountKey.prefix(8)):\(seed)")
+    }
+
+    /// True for a basal entry on the shared ID that Glooko has never confirmed.
+    public func canMoveToAccountID(_ entry: Entry) -> Bool {
+        guard entry.kind == .basal, !entry.deleted, entry.externalID.hasPrefix("loop:basal:"),
+              Self.guid("loop-insulin-basal|\(entry.externalID.dropFirst("loop:basal:".count))") == entry.guid else { return false }
+        return entries[entry.guid]?.confirmed == nil
+    }
+
+    /// Glooko refused this entry on the shared ID and doesn't hold it, so nothing needs deleting there. The next
+    /// refresh queues the hour under this account's own ID.
+    public mutating func moveToAccountID(_ entry: Entry) -> Bool {
+        guard canMoveToAccountID(entry) else { return false }
+        movedBasal = (movedBasal ?? []).union(["loop-insulin-basal|\(entry.externalID.dropFirst("loop:basal:".count))"])
+        entries[entry.guid] = nil
+        return true
     }
 
     /// The current GUID for a seed, moving past a revision Glooko holds (or may hold) as deleted.
@@ -368,6 +398,13 @@ public extension GlookoClient {
         }
         let held = heldDeleted.isEmpty ? "" : "; \(heldDeleted.count) held deleted by Glooko will be re-sent under new identities"
         return (confirmed, heldDeleted, "\(confirmed.count) of \(entries.count) insulin entries confirmed in Glooko" + held)
+    }
+
+    /// GETs only. Nil when the read is incomplete, so the caller can't take that as absent.
+    func holdsInsulin(_ entry: InsulinOutbox.Entry) async -> Bool? {
+        let full = await scan("insulins")
+        guard case .complete = full.outcome else { return nil }
+        return full.match(guid: entry.guid).0 != .completeNoMatch
     }
 
     /// GETs only: every confirmed live entry must still be held, live and unchanged.

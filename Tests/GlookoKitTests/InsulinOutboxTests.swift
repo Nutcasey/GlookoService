@@ -12,6 +12,55 @@ final class InsulinOutboxTests: XCTestCase {
     private func bolus(_ id: String, _ minute: Double, _ units: Double) -> SourceDose {
         SourceDose(id: id, kind: .bolus, start: at(minute), end: at(minute + 1), programmed: units, delivered: units)
     }
+    func testBasalHoursGetAnAccountIDWithoutChangingOrDuplicatingOnesAlreadyQueued() throws {
+        let from = InsulinOutbox.accountIDsFrom, earlier = from.addingTimeInterval(-3600)
+        func outbox(_ start: Date) -> InsulinOutbox {
+            var result = InsulinOutbox(reportingStart: start)
+            result.stage(created: [SourceDose(id: "basal", kind: .tempBasal, start: start, end: start.addingTimeInterval(3600), rate: 1, delivered: 1)], deleted: [])
+            return result
+        }
+        let now = from.addingTimeInterval(7200)
+
+        var mine = outbox(from), theirs = outbox(from)
+        mine.refresh(now: now, utcOffset: utc, accountKey: "aaaaaaaa11111111")
+        theirs.refresh(now: now, utcOffset: utc, accountKey: "bbbbbbbb22222222")
+        XCTAssertEqual(mine.due.count, 1)
+        XCTAssertNotEqual(mine.due[0].guid, theirs.due[0].guid, "Two accounts never share an hour's ID")
+        XCTAssertEqual(mine.due[0].externalID, "loop:basal:aaaaaaaa:\(Int(from.timeIntervalSince1970))")
+        let stable = mine.due[0].guid
+        mine.refresh(now: now, utcOffset: utc, accountKey: "aaaaaaaa11111111")
+        XCTAssertEqual(mine.due.map(\.guid), [stable])
+        XCTAssertFalse(mine.canMoveToAccountID(mine.due[0]), "An entry already on the account's ID has nowhere to move")
+
+        var older = outbox(earlier)
+        older.refresh(now: now, utcOffset: utc, accountKey: "aaaaaaaa11111111")
+        XCTAssertEqual(older.due[0].externalID, "loop:basal:\(Int(earlier.timeIntervalSince1970))", "Re-sending an older hour can't make a second row")
+
+        // Queued by a version before account IDs, even for an hour after the change.
+        var queued = outbox(from)
+        queued.refresh(now: now, utcOffset: utc)
+        let shared = try XCTUnwrap(queued.due.first)
+        queued.refresh(now: now, utcOffset: utc, accountKey: "aaaaaaaa11111111")
+        XCTAssertEqual(queued.due, [shared], "A queued hour stays on its ID")
+
+        queued.markSubmitted([shared])
+        XCTAssertTrue(queued.moveToAccountID(shared))
+        queued = try JSONDecoder().decode(InsulinOutbox.self, from: JSONEncoder().encode(queued))
+        queued.refresh(now: now, utcOffset: utc, accountKey: "aaaaaaaa11111111")
+        XCTAssertEqual(queued.due.count, 1, "No deletion is queued for the refused ID")
+        XCTAssertEqual(queued.due[0].units, shared.units)
+        XCTAssertEqual(queued.due[0].start, shared.start)
+        XCTAssertFalse(queued.due[0].deleted)
+        XCTAssertNotEqual(queued.due[0].guid, shared.guid)
+
+        var confirmed = outbox(from)
+        confirmed.refresh(now: now, utcOffset: utc)
+        let sent = try XCTUnwrap(confirmed.due.first)
+        sendAll(&confirmed)
+        XCTAssertFalse(confirmed.canMoveToAccountID(sent), "Glooko holds it, so a second ID would double it")
+        XCTAssertFalse(confirmed.moveToAccountID(sent))
+    }
+
     private func sendAll(_ outbox: inout InsulinOutbox) {
         let due = outbox.due
         outbox.markSubmitted(due)

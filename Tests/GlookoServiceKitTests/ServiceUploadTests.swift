@@ -142,6 +142,32 @@ final class ServiceUploadTests: XCTestCase {
         try await eventually { service.status.lastError == nil }
     }
 
+    func testABasalHourRefusedOnItsSharedIDMovesToTheAccountsOwnWithOneRowInGlooko() async throws {
+        start = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970 / 3600) * 3600 - 10800)
+        let service = try await signedIn(historyStart: start)
+        try await service.uploadSettingsData([completeSettings(insulinType: .novolog)])
+        try await service.uploadSettingsData([])
+        try await service.uploadDoseData(created: [], deleted: [])
+        // A queue saved before account IDs, so its hour is on the ID all accounts share.
+        var saved = InsulinOutbox(reportingStart: start)
+        saved.stage(created: [SourceDose(id: "basal", kind: .tempBasal, start: start, end: start.addingTimeInterval(3600), rate: 1, delivered: 1)], deleted: [])
+        saved.refresh(now: Date())
+        XCTAssertEqual(saved.due.count, 1)
+        try InsulinOutboxRepository(directory: accountFolder.deletingLastPathComponent()).save(saved, accountID: accountID)
+        let restored = try XCTUnwrap(GlookoService(rawState: service.rawState)); services.append(restored)
+
+        OfflineGlooko.refuseSharedBasalIDs(true)
+        await restored.uploadIfNeeded(force: true)
+        func basal() -> [[String: Any]] { OfflineGlooko.insulinRecords.filter { $0["insulinType"] as? String == "basal" } }
+        try await eventually(timeout: 15) { basal().count == 1 }
+        try await eventually { restored.summary.pendingDoses == 0 }
+        XCTAssertNil(restored.status.lastError)
+        let row = try XCTUnwrap(basal().first)
+        XCTAssertEqual((row["value"] as? NSNumber)?.doubleValue, 1)
+        XCTAssertEqual(row["externalId"] as? String, "loop:basal:\(GlookoAccount(id: accountID, email: "").storageKey.prefix(8)):\(Int(start.timeIntervalSince1970))")
+        XCTAssertNotNil(restored.diagnostics.state.events.first { $0.message.contains("this account's own ID") })
+    }
+
     func testSelectedInsulinUsesOriginalDosesAndHistoricalSettings() async throws {
         start = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970 / 3600) * 3600 - 10800)
         let service = try await signedIn(historyStart: start)
@@ -687,18 +713,20 @@ private final class OfflineGlooko: URLProtocol {
     private static var failGlucoseWrite = false
     private static var rejectGlucoseFile = false
     private static var refusedInsulinUnits: Double?
+    private static var refuseSharedBasal = false
     private static var glucoseGraphHidden = false
     private static var accountStatus = 200
     private var stopped = false
     private static func access<T>(_ action: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return action() }
 
-    static func reset(accountID: String) { access { account = accountID; rejectCredentials = false; signIns = 0; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; insulins = [:]; cancellations = 0; glucose = [:]; glucoseWrites = 0; failGlucoseWrite = false; rejectGlucoseFile = false; refusedInsulinUnits = nil; glucoseGraphHidden = false; accountStatus = 200 } }
+    static func reset(accountID: String) { access { account = accountID; rejectCredentials = false; signIns = 0; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; insulins = [:]; cancellations = 0; glucose = [:]; glucoseWrites = 0; failGlucoseWrite = false; rejectGlucoseFile = false; refusedInsulinUnits = nil; refuseSharedBasal = false; glucoseGraphHidden = false; accountStatus = 200 } }
     static func setAccountStatus(_ status: Int) { access { accountStatus = status } }
     static var glucoseWriteCount: Int { access { glucoseWrites } }
     static var glucoseValues: [Int] { access { glucose.values.compactMap { $0["glucoseValue"] as? Int } } }
     static func failNextGlucoseWrite() { access { failGlucoseWrite = true } }
     static func rejectGlucoseFiles(_ rejected: Bool) { access { rejectGlucoseFile = rejected } }
     static func refuseInsulinEntries(worth units: Double?) { access { refusedInsulinUnits = units } }
+    static func refuseSharedBasalIDs(_ refused: Bool) { access { refuseSharedBasal = refused } }
     static func hideGlucoseGraph(_ hidden: Bool) { access { glucoseGraphHidden = hidden } }
     /// A reading another uploader already sent, at a wall-clock minute ("dd-MM-yyyy HH:mm").
     static func storeGlucose(at clock: String, mgdl: Double) {
@@ -791,6 +819,7 @@ private final class OfflineGlooko: URLProtocol {
                 let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
                 let batch = object?["insulins"] as? [[String: Any]] ?? []
                 if let refused = Self.refusedInsulinUnits, batch.contains(where: { ($0["value"] as? NSNumber)?.doubleValue == refused }) { status = 500 }
+                else if Self.refuseSharedBasal, batch.contains(where: { ($0["externalId"] as? String)?.range(of: #"^loop:basal:\d+$"#, options: .regularExpression) != nil }) { status = 500 }
                 else { for entry in batch {
                     // Like Glooko, a soft-deleted GUID is never revived by a later live upsert.
                     guard let id = entry["guid"] as? String, (Self.insulins[id]?["softDeleted"] as? Int) != 1 else { continue }
