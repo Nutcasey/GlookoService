@@ -116,6 +116,32 @@ final class ServiceUploadTests: XCTestCase {
     }
 
     /// The adapter must retain per-dose insulin and time settings fallbacks to delivery, not upload time.
+    func testAnInsulinEntryGlookoRefusesDoesntStopTheRest() async throws {
+        start = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970 / 3600) * 3600 - 10800)
+        let service = try await signedIn(historyStart: start)
+        try await service.uploadSettingsData([completeSettings(insulinType: .novolog)])
+        try await service.uploadSettingsData([])
+        OfflineGlooko.refuseInsulinEntries(worth: 4)
+        let doses = (1...7).map { index in
+            DoseEntry(type: .bolus, startDate: start.addingTimeInterval(TimeInterval(index) * 300), value: Double(index), unit: .units, decisionId: nil,
+                      deliveredUnits: Double(index), syncIdentifier: "bolus-\(index)")
+        }
+        try await service.uploadDoseData(created: doses, deleted: [])
+        try await service.uploadDoseData(created: [], deleted: [])
+        await service.uploadIfNeeded(force: true)
+        func boluses() -> [Double] {
+            OfflineGlooko.insulinRecords.filter { $0["insulinType"] as? String == "bolus" }.compactMap { ($0["value"] as? NSNumber)?.doubleValue }.sorted()
+        }
+        try await eventually(timeout: 15) { boluses() == [1, 2, 3, 5, 6, 7] }
+        try await eventually { service.status.lastError?.contains("Glooko refused 1 insulin entry.") == true }
+        XCTAssertNotNil(service.diagnostics.state.events.first { $0.category == "insulin error" && $0.message.hasPrefix("Glooko refused the bolus at ") })
+
+        OfflineGlooko.refuseInsulinEntries(worth: nil)
+        await service.uploadIfNeeded(force: true)
+        try await eventually(timeout: 15) { boluses() == [1, 2, 3, 4, 5, 6, 7] }
+        try await eventually { service.status.lastError == nil }
+    }
+
     func testSelectedInsulinUsesOriginalDosesAndHistoricalSettings() async throws {
         start = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970 / 3600) * 3600 - 10800)
         let service = try await signedIn(historyStart: start)
@@ -252,6 +278,39 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertEqual(service.summary.pendingGlucose, 0)
         XCTAssertEqual(OfflineGlooko.glucoseWriteCount, 2)
         XCTAssertEqual(OfflineGlooko.glucoseValues, [12000])
+    }
+
+    func testARejectedGlucoseFileKeepsItsConfirmationsAndLetsNewerReadingsThrough() async throws {
+        let service = try await signedIn(historyStart: start)
+        service.configureUploads(insulin: false, cellular: true)
+        let clock = DateFormatter(); clock.locale = Locale(identifier: "en_US_POSIX"); clock.timeZone = TimeZone(secondsFromGMT: 0); clock.dateFormat = "dd-MM-yyyy HH:mm"
+        OfflineGlooko.storeGlucose(at: clock.string(from: start), mgdl: 120)
+        OfflineGlooko.rejectGlucoseFiles(true)
+        let saved = NSTimeZone.default
+        NSTimeZone.default = TimeZone(secondsFromGMT: 0)!
+        defer { NSTimeZone.default = saved }
+        try await service.uploadGlucoseData([sensor("present", 120), sensor("refused", 121, at: 300)])
+        try await service.uploadGlucoseData([])
+        try await eventually { service.status.glucoseError?.contains("Glooko rejected 1 reading.") == true }
+        XCTAssertEqual(service.summary.pendingGlucose, 1, "The reading already in Glooko is confirmed even though the file failed")
+        XCTAssertEqual(OfflineGlooko.glucoseWriteCount, 1)
+
+        OfflineGlooko.rejectGlucoseFiles(false)
+        try await service.uploadGlucoseData([sensor("newer", 122, at: 600)])
+        try await service.uploadGlucoseData([])
+        try await eventually { OfflineGlooko.glucoseValues.contains(12200) }
+        try await eventually { service.summary.pendingGlucose == 1 }
+        XCTAssertEqual(OfflineGlooko.glucoseWriteCount, 2, "Only the newer reading went; the rejected one waits for its hour")
+        XCTAssertFalse(OfflineGlooko.glucoseValues.contains(12100))
+        XCTAssertNotNil(service.status.glucoseError, "Newer readings succeeding doesn't hide the one still owed")
+        XCTAssertNotNil(service.diagnostics.state.events.first { $0.category == "glucose error" && $0.message.contains("HTTP 400") })
+
+        let restored = try XCTUnwrap(GlookoService(rawState: service.rawState)); services.append(restored)
+        XCTAssertNotNil(restored.status.glucoseError, "A restart doesn't forget it")
+        await service.uploadIfNeeded(force: true)
+        try await eventually { service.summary.pendingGlucose == 0 }
+        XCTAssertNil(service.status.glucoseError)
+        XCTAssertTrue(OfflineGlooko.glucoseValues.contains(12100))
     }
 
     func testGlucoseAutomaticallyRetriesWithoutAnotherSourceCallback() async throws {
@@ -626,16 +685,20 @@ private final class OfflineGlooko: URLProtocol {
     private static var glucose: [String: [String: Any]] = [:]
     private static var glucoseWrites = 0
     private static var failGlucoseWrite = false
+    private static var rejectGlucoseFile = false
+    private static var refusedInsulinUnits: Double?
     private static var glucoseGraphHidden = false
     private static var accountStatus = 200
     private var stopped = false
     private static func access<T>(_ action: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return action() }
 
-    static func reset(accountID: String) { access { account = accountID; rejectCredentials = false; signIns = 0; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; insulins = [:]; cancellations = 0; glucose = [:]; glucoseWrites = 0; failGlucoseWrite = false; glucoseGraphHidden = false; accountStatus = 200 } }
+    static func reset(accountID: String) { access { account = accountID; rejectCredentials = false; signIns = 0; foods = [:]; writes = 0; failWrite = false; heldKey = nil; held = nil; since = nil; insulins = [:]; cancellations = 0; glucose = [:]; glucoseWrites = 0; failGlucoseWrite = false; rejectGlucoseFile = false; refusedInsulinUnits = nil; glucoseGraphHidden = false; accountStatus = 200 } }
     static func setAccountStatus(_ status: Int) { access { accountStatus = status } }
     static var glucoseWriteCount: Int { access { glucoseWrites } }
     static var glucoseValues: [Int] { access { glucose.values.compactMap { $0["glucoseValue"] as? Int } } }
     static func failNextGlucoseWrite() { access { failGlucoseWrite = true } }
+    static func rejectGlucoseFiles(_ rejected: Bool) { access { rejectGlucoseFile = rejected } }
+    static func refuseInsulinEntries(worth units: Double?) { access { refusedInsulinUnits = units } }
     static func hideGlucoseGraph(_ hidden: Bool) { access { glucoseGraphHidden = hidden } }
     /// A reading another uploader already sent, at a wall-clock minute ("dd-MM-yyyy HH:mm").
     static func storeGlucose(at clock: String, mgdl: Double) {
@@ -694,6 +757,7 @@ private final class OfflineGlooko: URLProtocol {
             else if path == "/api/v3/device/file/upload" {
                 Self.glucoseWrites += 1
                 if Self.failGlucoseWrite { Self.failGlucoseWrite = false; status = 500 }
+                else if Self.rejectGlucoseFile { status = 400 }
                 else {
                     let lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
                     let clock = DateFormatter(); clock.locale = Locale(identifier: "en_US_POSIX"); clock.timeZone = TimeZone(secondsFromGMT: 0); clock.dateFormat = "yyyy-MM-dd HH:mm"
@@ -725,12 +789,13 @@ private final class OfflineGlooko: URLProtocol {
             } else if path == "/api/v2/meals" { status = 204 }
             else if path == "/api/v2/insulins", request.httpMethod == "PUT" {
                 let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-                for entry in object?["insulins"] as? [[String: Any]] ?? [] {
+                let batch = object?["insulins"] as? [[String: Any]] ?? []
+                if let refused = Self.refusedInsulinUnits, batch.contains(where: { ($0["value"] as? NSNumber)?.doubleValue == refused }) { status = 500 }
+                else { for entry in batch {
                     // Like Glooko, a soft-deleted GUID is never revived by a later live upsert.
                     guard let id = entry["guid"] as? String, (Self.insulins[id]?["softDeleted"] as? Int) != 1 else { continue }
                     Self.insulins[id] = entry
-                }
-                status = 204
+                }; status = 204 }
             } else if path == "/api/v2/insulins" { payload = ["insulins": Array(Self.insulins.values)] }
             else if path == "/api/v2/pumps" { payload = ["pumps": []] }
             else if path != "/api/v3/users/activities_and_event_data_sync/complete" { status = 500 }

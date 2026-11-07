@@ -341,7 +341,7 @@ public extension GlookoClient {
         try Task.checkCancellation()
         if [301, 302, 303, 307, 308, 401, 403, 421].contains(result.status) { throw GlookoError.authenticationRequired(result.status) }
         guard (200..<300).contains(result.status) else {
-            throw GlookoError.requestRejected("Glooko rejected the insulin entries (HTTP \(result.status)): \(Self.redact(result.text.prefix(300)))")
+            throw GlookoError.entriesRefused(status: result.status, detail: Self.redact(result.text.prefix(300)))
         }
         if let serverDate = result.serverDate {
             readbackFrom = min(readbackFrom, serverDate.addingTimeInterval(-(ProcessInfo.processInfo.systemUptime - uptime) - 300))

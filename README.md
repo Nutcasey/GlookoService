@@ -236,7 +236,8 @@ Loop alerts you when:
 - the Glooko session needs you to sign in;
 - source history has paused, for example insulin with no real pump;
 - eligible data has waited longer than **Alert after**;
-- confirmation from Glooko is overdue.
+- confirmation from Glooko is overdue;
+- Glooko has been refusing glucose files for longer than **Alert after**.
 
 Settling data and streams you've switched off don't count as overdue. Alerts aren't repeated, and they're withdrawn when the problem clears. Background delivery depends on Loop, iOS and your notification settings. **Send a test alert** checks presentation only.
 
@@ -269,6 +270,8 @@ The service saves each change from Loop before acknowledging it. Nothing is lost
 
 **Carbs** have their own queue and retries. An edit updates the same food entry, and a deletion soft-deletes it. A failed carb upload retries without needing another change in Loop.
 
+If Glooko refuses a batch of insulin entries, the batch is split until the refused entry is alone. The rest are sent, and that entry is named in **Recent activity**, kept on the phone and tried again every hour, or when you tap **Send now**.
+
 Insulin and carb confirmations fall back to a complete read when an already accepted retry falls outside the recent-update cursor. Temporary account-check failures remain retryable. Signing in again resumes retained work without requiring a new source event.
 
 **Glucose** has its own saved queue:
@@ -276,6 +279,8 @@ Insulin and carb confirmations fall back to a complete read when an already acce
 2. It checks which readings Glooko already has.
 3. It sends the missing ones as a LibreView-format CSV, with year-first dates. Glooko rejects a day-month file when every row falls on one day from the 1st to the 12th.
 4. A reading is confirmed only when it appears in **both** Glooko's stored CGM records and its graph data.
+
+If Glooko refuses a file, readings it already holds are still confirmed and the refused ones stay on the phone. They're tried again every hour, or when you tap **Send now**, and are never sent in the same file as newer readings, so newer readings keep going. A server error or a lost connection isn't a refusal: the queue waits and retries. A refused file that holds one reading Glooko will never take keeps being refused as a whole, because Glooko doesn't say which row it objects to.
 
 Replaying an accepted reading doesn't create another copy. A reading that can't be represented is skipped, logged in **Recent activity** and counted in Diagnostics; the readings around it carry on. That covers the repeated hour when clocks go back (the first reading at each minute is kept), a changed value for a reading already queued, and a minute where Glooko already holds a different reading, which is never overwritten.
 

@@ -17,6 +17,18 @@ final class SyncHealthTests: XCTestCase {
         XCTAssertEqual(unconfirmed.issue.map(\.id), ["confirmation-overdue-insulin"])
         XCTAssertEqual(health.notifications(pending: [], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(7500)).retract, ["confirmation-overdue-insulin"])
     }
+    /// Accepted once before, then rejected: the alert must not say Glooko accepted the data.
+    func testARejectedStreamAlertsAsRejectedAfterTheThresholdAndRetractsOnRecovery() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        var health = GlookoSyncHealth()
+        XCTAssertTrue(health.notifications(pending: [.glucose], pausedReason: nil, threshold: 3600, canDeliver: true, now: start).issue.isEmpty)
+        health.submitted(.glucose, at: start)
+        XCTAssertTrue(health.notifications(pending: [.glucose], rejected: [.glucose], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(3599)).issue.isEmpty)
+        let rejected = health.notifications(pending: [.glucose], rejected: [.glucose], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(3600))
+        XCTAssertEqual(rejected.issue.map(\.id), ["file-rejected-glucose"])
+        XCTAssertTrue(GlookoSyncHealth.allNoticeIDs.contains("file-rejected-glucose"))
+        XCTAssertEqual(health.notifications(pending: [], pausedReason: nil, threshold: 3600, canDeliver: true, now: start.addingTimeInterval(3700)).retract, ["file-rejected-glucose"])
+    }
     func testAuthAndReviewAlertsAreImmediateAndWaitForAnIssuerWithoutBeingLost() {
         var health = GlookoSyncHealth(); let now = Date()
         health.authenticationRequired = "Glooko rejected this account"

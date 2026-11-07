@@ -219,7 +219,7 @@ private final class RefuseRedirects: NSObject, URLSessionTaskDelegate, @unchecke
 
 public enum GlookoError: Error, CustomStringConvertible {
     case signInFailed([String]), twoFactorRequired, notSignedIn, badURL(String), invalidResource, invalidResponse
-    case authenticationRequired(Int), credentialRejected(Int), requestRejected(String)
+    case authenticationRequired(Int), credentialRejected(Int), requestRejected(String), entriesRefused(status: Int, detail: String)
     public var description: String {
         switch self {
         case .signInFailed(let f): return "Sign-in failed:\n  " + f.joined(separator: "\n  ")
@@ -232,6 +232,7 @@ public enum GlookoError: Error, CustomStringConvertible {
         case .credentialRejected(let status):
             return "Glooko rejected sign-in or restricted this account (HTTP \(status)). Check the account and password, then sign in again."
         case .requestRejected(let reason): return reason
+        case .entriesRefused(let status, let detail): return "Glooko rejected the insulin entries (HTTP \(status)): \(detail)"
         }
     }
 }

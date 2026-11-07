@@ -24,7 +24,7 @@ public struct GlookoSyncHealth: Codable, Sendable {
         if progress.awaitingSince == nil { progress.awaitingSince = date }
         streams[stream.rawValue] = progress
     }
-    public mutating func notices(pending: Set<Stream>, pausedReason: String?, threshold: TimeInterval, now: Date = Date()) -> [Notice] {
+    public mutating func notices(pending: Set<Stream>, rejected: Set<Stream> = [], pausedReason: String?, threshold: TimeInterval, now: Date = Date()) -> [Notice] {
         for stream in Stream.allCases {
             var progress = streams[stream.rawValue] ?? .init()
             if pending.contains(stream) {
@@ -42,6 +42,13 @@ public struct GlookoSyncHealth: Codable, Sendable {
         for stream in pending.sorted(by: { $0.rawValue < $1.rawValue }) {
             let progress = streams[stream.rawValue]!
             let name = stream.rawValue == "carbs" ? "Carb" : stream.rawValue.capitalized
+            if rejected.contains(stream) {
+                if let since = progress.pendingSince, now.timeIntervalSince(since) >= threshold {
+                    result.append(.init(id: "file-rejected-" + stream.rawValue, title: "Glooko is rejecting \(stream.rawValue) uploads",
+                        message: "Glooko has refused some \(stream.rawValue) records. They stay on this phone and are tried again every hour, while newer records keep sending. Open Loop Settings → Glooko → Diagnostics."))
+                }
+                continue
+            }
             if let awaiting = progress.awaitingSince, now.timeIntervalSince(awaiting) >= threshold {
                 result.append(.init(id: "confirmation-overdue-" + stream.rawValue, title: "Glooko \(stream.rawValue) confirmation delayed",
                     message: "Glooko accepted a \(stream.rawValue) submission but has not confirmed all pending records for at least \(Int(threshold / 60)) minutes. Open Loop Settings → Glooko → Diagnostics."))
@@ -57,15 +64,15 @@ public struct GlookoSyncHealth: Codable, Sendable {
         public var issue: [Notice]
         public var retract: Set<String>
     }
-    public mutating func notifications(pending: Set<Stream>, pausedReason: String?, threshold: TimeInterval,
+    public mutating func notifications(pending: Set<Stream>, rejected: Set<Stream> = [], pausedReason: String?, threshold: TimeInterval,
                                       canDeliver: Bool, now: Date = Date()) -> Delivery {
-        let desired = notices(pending: pending, pausedReason: pausedReason, threshold: threshold, now: now)
+        let desired = notices(pending: pending, rejected: rejected, pausedReason: pausedReason, threshold: threshold, now: now)
         guard canDeliver else { return .init(issue: [], retract: []) }
         let next = Set(desired.map(\.id)), prior = activeNoticeIDs
         activeNoticeIDs = next
         return .init(issue: desired.filter { !prior.contains($0.id) }, retract: prior.subtracting(next))
     }
     public static var allNoticeIDs: Set<String> {
-        Set(["authentication-needed", "uploads-paused"] + Stream.allCases.flatMap { ["submission-overdue-" + $0.rawValue, "confirmation-overdue-" + $0.rawValue] })
+        Set(["authentication-needed", "uploads-paused"] + Stream.allCases.flatMap { ["submission-overdue-" + $0.rawValue, "confirmation-overdue-" + $0.rawValue, "file-rejected-" + $0.rawValue] })
     }
 }

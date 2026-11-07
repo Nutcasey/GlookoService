@@ -60,6 +60,8 @@ public struct GlucoseOutbox: Codable, Equatable, Sendable {
         /// Set when Glooko holds a different reading at this minute. The minute stays occupied so
         /// replays are ignored, and the entry is no longer due.
         public var skipped: SkippedGlucose.Reason? = nil
+        /// Set when Glooko rejected the file holding this reading. It stays due and is tried again from this date.
+        public var retryAfter: Date? = nil
     }
     public struct StageResult: Equatable, Sendable {
         public var skipped: [SkippedGlucose] = []
@@ -129,6 +131,30 @@ public struct GlucoseOutbox: Codable, Equatable, Sendable {
     public var due: [SourceGlucose] {
         entries.values.filter { !$0.confirmed && $0.skipped == nil }.map(\.reading).sorted { $0.date < $1.date }
     }
+    /// What to send next, oldest first. Readings not yet rejected go first, so a file Glooko keeps
+    /// rejecting is never sent with them and can't hold them up.
+    public func sendable(at now: Date) -> [SourceGlucose] {
+        let waiting = entries.values.filter { !$0.confirmed && $0.skipped == nil }
+        let fresh = waiting.filter { $0.retryAfter == nil }
+        let batch = fresh.isEmpty ? waiting.filter { $0.retryAfter! <= now } : fresh
+        return batch.map(\.reading).sorted { $0.date < $1.date }
+    }
+    /// Readings Glooko has rejected and not accepted since.
+    public var rejected: [SourceGlucose] {
+        entries.values.filter { !$0.confirmed && $0.skipped == nil && $0.retryAfter != nil }.map(\.reading)
+    }
+    public var nextRetry: Date? {
+        entries.values.filter { !$0.confirmed && $0.skipped == nil }.compactMap(\.retryAfter).min()
+    }
+    public mutating func hold(_ readings: [SourceGlucose], until date: Date) {
+        for reading in readings where entries[reading.minute]?.reading == reading {
+            entries[reading.minute]?.retryAfter = date
+        }
+    }
+    public mutating func retryRejectedNow() {
+        for (minute, entry) in entries where entry.retryAfter != nil { entries[minute]?.retryAfter = .distantPast }
+    }
+
     public mutating func confirm(_ reading: SourceGlucose) {
         guard entries[reading.minute]?.reading == reading else { return }
         entries[reading.minute]?.confirmed = true
@@ -210,6 +236,9 @@ public struct GlucoseSubmission: Equatable, Sendable {
     /// Glooko already holds a different, duplicate or incomplete reading at these minutes. Nothing was
     /// uploaded for them.
     public var differentInGlooko: [SourceGlucose] = []
+    /// Glooko refused the file holding these readings. Readings already in Glooko are still confirmed above.
+    public var rejected: [SourceGlucose] = []
+    public var rejectedStatus: Int?
     public init() {}
 }
 
@@ -232,6 +261,10 @@ public extension GlookoClient {
             path: "/api/v3/device/file/upload?extractorName=LibreviewCSV",
             body: GlucoseOutbox.csv(pending), authenticated: true,
             headers: ["Content-Type": "application/octet-stream"])
+        if Self.fileWasRejected(upload.status) {
+            result.rejected = pending; result.rejectedStatus = upload.status
+            return result
+        }
         try requireGlucoseSuccess(upload)
         var matched: [SourceGlucose] = []
         for delay in [0, 1, 2, 4] {
@@ -312,6 +345,11 @@ public extension GlookoClient {
             }
         }
         return points
+    }
+
+    /// Signing in again, or waiting a moment, can fix the other client errors. Server errors aren't about the file.
+    private static func fileWasRejected(_ status: Int) -> Bool {
+        (400..<500).contains(status) && ![401, 403, 408, 421, 429].contains(status)
     }
 
     private func requireGlucoseSuccess(_ result: HTTPResult) throws {

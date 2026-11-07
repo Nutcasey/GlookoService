@@ -108,6 +108,8 @@ public final class GlookoService: Service {
     private var glucoseRetryTask: Task<Void, Never>?
     private var glucoseRetryID: UUID?
     private var glucoseRetryDelay: TimeInterval = 30
+    private var glucoseRetryWaitsForRejected = false
+    private let glucoseRejectionHold: TimeInterval = 60 * 60
     private var glucoseWakeRequested = false
     private var glucoseRepository: GlucoseOutboxRepository { .init(directory: repository.directory) }
     private let credentials = GlookoCredentials()
@@ -131,6 +133,9 @@ public final class GlookoService: Service {
     private var inspectionID: UUID?
     private var diagnosticRepository: GlookoDiagnosticsRepository { .init(directory: repository.directory) }
     private let uploadInterval: TimeInterval = 15 * 60
+    /// Insulin entries Glooko refused on their own, tried again from these dates. Not saved: a restart finds them again.
+    private var insulinHeld: [String: Date] = [:]
+    private let insulinRefusalHold: TimeInterval = 60 * 60
     public static let region = GlookoClient.Region(signInHosts: ["eu.api.glooko.com", "global.api.glooko.com"], dataHost: "eu.api.glooko.com")
 
     private static var historyDirectory: URL {
@@ -593,6 +598,8 @@ public final class GlookoService: Service {
                 transport = try await authenticatedClient(generation, replacing: transport)
                 try await migrateInsulinClocks(transport, generation: generation)
             }
+            if force { queue.sync { insulinHeld = [:] } }
+            var batchLimit = 100, refusedAlone = 0, anyAccepted = false
             for _ in 0..<50 {
                 try check(generation)
                 let batch = try queue.sync { () throws -> ([InsulinOutbox.Entry], TimeZone)? in
@@ -600,7 +607,8 @@ public final class GlookoService: Service {
                     // Authentication is an await boundary: include every source change received during it.
                     try reconcileInsulin()
                     guard var outbox = insulin else { throw ServiceError.blocked(insulinStorageError ?? "Insulin storage is unavailable") }
-                    let due = Array(outbox.due.prefix(100))
+                    let now = Date()
+                    let due = Array(outbox.due.filter { (insulinHeld[$0.guid] ?? .distantPast) <= now }.prefix(batchLimit))
                     guard !due.isEmpty else { return nil }
                     outbox.markSubmitted(due)
                     try saveInsulin(outbox)
@@ -617,10 +625,28 @@ public final class GlookoService: Service {
                     try check(generation)
                     result = try await transport.submitInsulin(due, timeZone: timeZone)
                 }
+                catch GlookoError.entriesRefused(let status, _) {
+                    // Glooko doesn't say which entry it objects to. Halve the batch until the entry is alone, so the rest
+                    // still go. Three lone refusals with nothing accepted looks like Glooko itself failing, so wait for the next cycle.
+                    let stop = queue.sync { () -> Bool in
+                        guard lifecycle == generation, !deleted else { return true }
+                        recordDiagnostic("insulin error", "Glooko refused \(due.count) entries (HTTP \(status))")
+                        guard due.count == 1, let entry = due.first else { batchLimit = due.count / 2; return false }
+                        insulinHeld[entry.guid] = Date().addingTimeInterval(insulinRefusalHold)
+                        recordDiagnostic("insulin error", "Glooko refused the \(entry.kind.rawValue) at \(WallClock(timeZone: timeZone).string(entry.start).prefix(16)); trying again in an hour")
+                        currentStatus.lastError = insulinRefusalMessage
+                        batchLimit = 100; refusedAlone += 1
+                        return refusedAlone >= 3 && !anyAccepted
+                    }
+                    changed()
+                    if stop { return }
+                    continue
+                }
+                batchLimit = 100; anyAccepted = true
                 try check(generation)
                 let progressed = try queue.sync { () throws -> Bool in
                     guard lifecycle == generation, !deleted, var outbox = insulin else { throw CancellationError() }
-                    for entry in result.confirmed { outbox.confirm(entry) }
+                    for entry in result.confirmed { outbox.confirm(entry); insulinHeld[entry.guid] = nil }
                     for entry in result.heldDeleted { outbox.supersede(entry) }
                     if !result.heldDeleted.isEmpty { outbox.refresh(now: Date(), insulinName: reportedInsulinName(for:), utcOffset: { reportingOffset(for: $0, insulin: true) }) }
                     try saveInsulin(outbox)
@@ -630,7 +656,7 @@ public final class GlookoService: Service {
                         currentStatus.lastConfirmedAt = Date()
                         currentStatus.uploadedThrough = outbox.confirmedEntries.filter { $0.kind == .basal }.map(InsulinOutbox.hourEnd).max()
                     }
-                    currentStatus.lastError = result.confirmed.count == due.count ? nil : "Glooko has not yet confirmed every insulin entry; they will be sent again"
+                    currentStatus.lastError = result.confirmed.count == due.count ? insulinRefusalMessage : "Glooko has not yet confirmed every insulin entry; they will be sent again"
                     return result.confirmed.count == due.count || !result.heldDeleted.isEmpty
                 }
                 changed()
@@ -640,6 +666,13 @@ public final class GlookoService: Service {
         catch {
             queue.sync { if lifecycle == generation && !deleted { currentStatus.lastError = GlookoClient.errorDescription(error); recordDiagnostic("insulin error", GlookoClient.errorDescription(error)) } }
         }
+    }
+
+    /// Called on the state queue.
+    private var insulinRefusalMessage: String? {
+        let count = insulin?.due.filter { insulinHeld[$0.guid] != nil }.count ?? 0
+        if count == 0 { return nil }
+        return (count == 1 ? "Glooko refused 1 insulin entry. It's" : "Glooko refused \(count) insulin entries. They're") + " kept and tried again every hour, and the rest keep sending."
     }
 
     /// Called on the state queue. Simulator and unknown pump sources are dropped. A logged dose doesn't depend on a pump.
@@ -883,11 +916,17 @@ public final class GlookoService: Service {
         do {
             glucose = try glucoseRepository.load(accountID: accountID, historyStart: insulin?.reportingStart ?? history?.historyStart,
                                                   required: glucoseStorageCreated)
-            glucoseStorageError = nil; currentStatus.glucoseError = nil
+            glucoseStorageError = nil; currentStatus.glucoseError = glucose.flatMap(glucoseRejectionMessage)
         } catch {
             glucose = nil; glucoseStorageError = "Could not restore glucose uploads: \(GlookoClient.errorDescription(error))"
             currentStatus.glucoseError = glucoseStorageError
         }
+    }
+
+    private func glucoseRejectionMessage(_ outbox: GlucoseOutbox) -> String? {
+        let count = outbox.rejected.count
+        if count == 0 { return nil }
+        return (count == 1 ? "Glooko rejected 1 reading. It's" : "Glooko rejected \(count) readings. They're") + " kept and tried again every hour, and newer readings keep sending."
     }
 
     private func saveGlucose(_ outbox: GlucoseOutbox) throws {
@@ -899,8 +938,12 @@ public final class GlookoService: Service {
     private func sendGlucose(force: Bool = false) async {
         let task = queue.sync { () -> Task<Void, Never>? in
             guard onboarded, !deleted, accountID != nil, glucoseEnabled, glucoseQueryDrained else { return nil }
-            if force { glucoseRetryTask?.cancel(); glucoseRetryTask = nil; glucoseRetryID = nil }
+            if force { glucoseRetryTask?.cancel(); glucoseRetryTask = nil; glucoseRetryID = nil; glucose?.retryRejectedNow() }
             if let task = glucoseTask { glucoseWakeRequested = true; return task }
+            // Rejected readings waiting out their hour mustn't delay a newer reading.
+            if glucoseRetryWaitsForRejected, glucoseRetryTask != nil, glucose?.sendable(at: Date()).isEmpty == false {
+                glucoseRetryTask?.cancel(); glucoseRetryTask = nil; glucoseRetryID = nil
+            }
             guard force || glucoseRetryTask == nil, glucoseStorageError == nil, glucose?.due.isEmpty == false else { return nil }
             let generation = lifecycle, id = UUID()
             glucoseTaskID = id; glucoseWakeRequested = false
@@ -917,7 +960,10 @@ public final class GlookoService: Service {
                 guard lifecycle == generation, glucoseTaskID == id else { return }
                 glucoseTask = nil; glucoseTaskID = nil
                 if !deleted, onboarded, glucoseEnabled, glucose?.due.isEmpty == false {
-                    let delay = glucoseWakeRequested ? 0 : glucoseRetryDelay
+                    let now = Date()
+                    let wait = glucose?.sendable(at: now).isEmpty == true ? glucose?.nextRetry.map { max(0, $0.timeIntervalSince(now)) } : nil
+                    let delay = glucoseWakeRequested ? 0 : wait ?? glucoseRetryDelay
+                    glucoseRetryWaitsForRejected = wait != nil
                     let retry = UUID(); glucoseRetryID = retry
                     glucoseRetryTask = Task { [weak self] in
                         do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) } catch { return }
@@ -929,7 +975,7 @@ public final class GlookoService: Service {
                         }
                         if ready { await self.sendGlucose() }
                     }
-                    glucoseRetryDelay = min(glucoseRetryDelay * 2, uploadInterval)
+                    glucoseRetryDelay = wait == nil ? min(glucoseRetryDelay * 2, uploadInterval) : 30
                 } else { glucoseRetryDelay = 30 }
                 glucoseWakeRequested = false
             }
@@ -942,7 +988,7 @@ public final class GlookoService: Service {
                 let batch = try queue.sync { () throws -> [SourceGlucose] in
                     guard lifecycle == generation, glucoseTaskID == id, glucoseEnabled, glucoseQueryDrained else { throw CancellationError() }
                     guard var outbox = glucose else { throw ServiceError.blocked(glucoseStorageError ?? "Glucose storage is unavailable") }
-                    let due = Array(outbox.due.prefix(500))
+                    let due = Array(outbox.sendable(at: Date()).prefix(500))
                     if !due.isEmpty {
                         outbox.markSubmitted(due)
                         try saveGlucose(outbox); glucose = outbox
@@ -964,9 +1010,13 @@ public final class GlookoService: Service {
                     guard lifecycle == generation, glucoseTaskID == id, !deleted, glucoseEnabled, var outbox = glucose else { throw CancellationError() }
                     for reading in confirmed { outbox.confirm(reading) }
                     let skipped = submission.differentInGlooko.compactMap { outbox.skipDifferentInGlooko($0) }
+                    outbox.hold(submission.rejected, until: Date().addingTimeInterval(glucoseRejectionHold))
                     outbox.pruneConfirmed(before: Date().addingTimeInterval(-14 * 86400))
                     try saveGlucose(outbox); glucose = outbox
-                    currentStatus.glucoseError = nil
+                    currentStatus.glucoseError = glucoseRejectionMessage(outbox)
+                    if let status = submission.rejectedStatus {
+                        recordDiagnostic("glucose error", "Glooko rejected a file of \(submission.rejected.count) readings (HTTP \(status)); trying again in an hour")
+                    }
                     currentStatus.glucoseDetail = "\(confirmed.count) of \(batch.count) readings verified in Glooko records and graphs"
                         + (skipped.isEmpty ? "" : "; \(skipped.count) skipped")
                     recordDiagnostic("glucose", "\(confirmed.count) of \(batch.count) readings verified in stored records and graphs")
@@ -979,7 +1029,7 @@ public final class GlookoService: Service {
                     }
                 }
                 changed()
-                if confirmed.count + submission.differentInGlooko.count < batch.count { return }
+                if confirmed.count + submission.differentInGlooko.count + submission.rejected.count < batch.count { return }
             }
         } catch is CancellationError { }
         catch { queue.sync { if lifecycle == generation, !deleted { currentStatus.glucoseError = "Glucose not confirmed: \(GlookoClient.errorDescription(error))"; recordDiagnostic("glucose error", GlookoClient.errorDescription(error)) } } }
@@ -1015,7 +1065,8 @@ public final class GlookoService: Service {
                 }
                 if let waiting = sourceStreamsWaitingSince, Date().timeIntervalSince(waiting) > alertThreshold { reason = "Loop has not finished reading the dose and settings streams. Insulin uploads are paused." }
             }
-            let delivery = syncHealth.notifications(pending: pending, pausedReason: reason, threshold: alertThreshold, canDeliver: serviceDelegate != nil)
+            let rejected: Set<GlookoSyncHealth.Stream> = glucoseEnabled && glucose?.rejected.isEmpty == false ? [.glucose] : []
+            let delivery = syncHealth.notifications(pending: pending, rejected: rejected, pausedReason: reason, threshold: alertThreshold, canDeliver: serviceDelegate != nil)
             scheduleHealthCheck()
             return delivery
         }

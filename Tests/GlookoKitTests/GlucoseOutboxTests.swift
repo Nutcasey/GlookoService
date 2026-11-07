@@ -87,6 +87,29 @@ final class GlucoseOutboxTests: XCTestCase {
     }
 
     /// Glooko rejects a day-month file (HTTP 400) when every row falls on one day from the 1st to the 12th.
+    func testRejectedReadingsStayDueAndNeverTravelWithNewerOnes() throws {
+        let old = SourceGlucose(id: "old", date: instant, mgdl: 123, utcOffset: 0)
+        let new = SourceGlucose(id: "new", date: instant.addingTimeInterval(300), mgdl: 124, utcOffset: 0)
+        var outbox = GlucoseOutbox(historyStart: instant.addingTimeInterval(-1))
+        outbox.stage([old])
+        outbox.hold([old], until: instant.addingTimeInterval(3600))
+        XCTAssertEqual(outbox.due, [old], "It is still owed to Glooko")
+        XCTAssertEqual(outbox.sendable(at: instant), [])
+        XCTAssertEqual(outbox.nextRetry, instant.addingTimeInterval(3600))
+        outbox.stage([new])
+        XCTAssertEqual(outbox.sendable(at: instant), [new])
+        XCTAssertEqual(outbox.sendable(at: instant.addingTimeInterval(4000)), [new], "A newer reading isn't sent in the file that was rejected")
+        outbox.confirm(new)
+        XCTAssertEqual(outbox.sendable(at: instant.addingTimeInterval(4000)), [old])
+        outbox = try JSONDecoder().decode(GlucoseOutbox.self, from: JSONEncoder().encode(outbox))
+        XCTAssertEqual(outbox.rejected, [old], "The hold survives a restart")
+        outbox.retryRejectedNow()
+        XCTAssertEqual(outbox.sendable(at: instant), [old])
+        outbox.confirm(old)
+        XCTAssertEqual(outbox.rejected, [])
+        XCTAssertNil(outbox.nextRetry)
+    }
+
     func testTheCSVDatesCantBeMisreadOnTheFirstTwelveDaysOfAMonth() throws {
         let instant = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-05T00:06:00Z"))
         let csv = String(decoding: GlucoseOutbox.csv([SourceGlucose(id: "a", date: instant, mgdl: 123.45, utcOffset: 3600)]), as: UTF8.self)
