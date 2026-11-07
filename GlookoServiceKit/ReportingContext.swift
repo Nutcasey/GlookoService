@@ -2,7 +2,6 @@ import Foundation
 import HealthKit
 import CryptoKit
 import LoopKit
-import LoopAlgorithm
 
 struct ReportingContext: Codable, Equatable {
     var date: Date
@@ -34,13 +33,14 @@ struct ReportingContext: Codable, Equatable {
         } else { sourceID = nil }
         // Loop's own model choice (PresetInsulinModelProvider): the pump's insulin type, then the default rapid-acting
         // model, then rapid-acting adult. Onboarded Loop settings usually leave the default model unset.
-        let action: TimeInterval
+        let model: StoredInsulinModel
         switch stored.insulinType {
-        case .fiasp: action = ExponentialInsulinModelPreset.fiasp.actionDuration
-        case .lyumjev: action = ExponentialInsulinModelPreset.lyumjev.actionDuration
-        case .afrezza: action = ExponentialInsulinModelPreset.afrezza.actionDuration
-        default: action = stored.defaultRapidActingModel?.actionDuration ?? ExponentialInsulinModelPreset.rapidActingAdult.actionDuration
+        case .fiasp: model = StoredInsulinModel(.fiasp)
+        case .lyumjev: model = StoredInsulinModel(.lyumjev)
+        case .afrezza: model = StoredInsulinModel(.afrezza)
+        default: model = stored.defaultRapidActingModel ?? StoredInsulinModel(.rapidActingAdult)
         }
+        let action = model.actionDuration
         guard let basal = stored.basalRateSchedule, let ratio = stored.carbRatioSchedule,
               let sensitivity = stored.insulinSensitivitySchedule, let target = stored.glucoseTargetRangeSchedule,
               let maximumBolus = stored.maximumBolus, let maximumBasal = stored.maximumBasalRatePerHour,
@@ -67,14 +67,13 @@ struct ReportingContext: Codable, Equatable {
             problem = "Loop has an invalid insulin action duration"
             return
         }
-        let mgdl = LoopUnit.milligramsPerDeciliter
         let therapy = TherapySettings(
             basal: values(basal.items, { $0 }), carbRatio: values(ratio.items, { $0 }),
-            sensitivityMGDL: values(sensitivity.items, { LoopQuantity(unit: sensitivity.unit, doubleValue: $0).doubleValue(for: mgdl) }),
-            targetMGDL: values(target.items, { LoopQuantity(unit: target.unit, doubleValue: $0.minValue).doubleValue(for: mgdl) }),
-            correctionThresholdMGDL: values(target.items, { LoopQuantity(unit: target.unit, doubleValue: $0.maxValue).doubleValue(for: mgdl) }),
+            sensitivityMGDL: values(sensitivity.items, { GlucoseThreshold(unit: sensitivity.unit, value: $0).quantity.doubleValue(for: .milligramsPerDeciliter) }),
+            targetMGDL: values(target.items, { GlucoseThreshold(unit: target.unit, value: $0.minValue).quantity.doubleValue(for: .milligramsPerDeciliter) }),
+            correctionThresholdMGDL: values(target.items, { GlucoseThreshold(unit: target.unit, value: $0.maxValue).quantity.doubleValue(for: .milligramsPerDeciliter) }),
             maximumBolus: maximumBolus, maximumBasal: maximumBasal, insulinActionMinutes: Int((action / 60).rounded()),
-            minimumGlucoseMGDL: threshold.quantity.doubleValue(for: mgdl),
+            minimumGlucoseMGDL: threshold.quantity.doubleValue(for: .milligramsPerDeciliter),
             glucoseDisplayMMOL: stored.bloodGlucoseUnit?.unitString.lowercased().contains("mol") == true)
         do { try therapy.validate(); settings = therapy }
         catch { problem = "Loop therapy settings are outside the supported ranges" }
@@ -90,19 +89,20 @@ struct ReportingContext: Codable, Equatable {
 extension DoseEntry {
     /// Keep measured volume independently of programmed rate, including final temp basal pulse rounding.
     var sourceDose: SourceDose? {
-        guard !manuallyEntered else { return nil }
         let id = syncIdentifier ?? "\(type.rawValue)-\(startDate.timeIntervalSince1970)"
         switch type {
         case .basal, .tempBasal:
             return SourceDose(id: id, kind: type == .basal ? .basal : .tempBasal, start: startDate, end: endDate,
                               rate: unitsPerHour, delivered: isMutable ? nil : unitsInDeliverableIncrements,
-                              automatic: automatic, isMutable: isMutable, insulinName: insulinType?.brandName)
+                              automatic: automatic, isMutable: isMutable, insulinName: insulinType?.brandName,
+                              manual: manuallyEntered ? true : nil)
         case .suspend:
             return SourceDose(id: id, kind: .suspend, start: startDate, end: endDate, isMutable: isMutable)
         case .resume: return nil
         case .bolus:
             return SourceDose(id: id, kind: .bolus, start: startDate, end: endDate, programmed: programmedUnits,
-                              delivered: deliveredUnits, automatic: automatic, isMutable: isMutable, insulinName: insulinType?.brandName)
+                              delivered: deliveredUnits, automatic: automatic, isMutable: isMutable, insulinName: insulinType?.brandName,
+                              manual: manuallyEntered ? true : nil)
         }
     }
 }

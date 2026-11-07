@@ -21,13 +21,15 @@ public struct SourceDose: Equatable, Codable, Sendable {
     public var insulinName: String?
     /// Still changing (running temp basal, bolus in progress); never committed to history.
     public var isMutable: Bool
+    /// True for a dose someone logged by hand, such as a pen injection. Nil for recorded delivery.
+    public var manual: Bool? = nil
 
     public init(id: String, kind: Kind, start: Date, end: Date, rate: Double? = nil, programmed: Double = 0,
                 delivered: Double? = nil, automatic: Bool? = nil, isMutable: Bool = false, sourceID: String? = nil,
-                insulinName: String? = nil) {
+                insulinName: String? = nil, manual: Bool? = nil) {
         self.id = id; self.kind = kind; self.start = start; self.end = end; self.rate = rate
         self.programmed = programmed; self.delivered = delivered; self.automatic = automatic; self.isMutable = isMutable; self.sourceID = sourceID
-        self.insulinName = insulinName
+        self.insulinName = insulinName; self.manual = manual
     }
 }
 

@@ -642,7 +642,7 @@ public final class GlookoService: Service {
         }
     }
 
-    /// Called on the state queue. Only doses from a real pump are reported; simulator and unknown sources are dropped.
+    /// Called on the state queue. Simulator and unknown pump sources are dropped. A logged dose doesn't depend on a pump.
     private func reconcileInsulin() throws {
         guard let accountID else { throw ServiceError.signInRequired }
         if insulin == nil { restoreInsulin(accountID) }
@@ -655,7 +655,7 @@ public final class GlookoService: Service {
         let before = outbox.doses.count
         outbox.retainDoses { dose in
             let source = captured.last(where: { $0.date <= dose.start }) ?? captured.first
-            return source?.isRealPump == true
+            return dose.manual == true || source?.isRealPump == true
         }
         if outbox.doses.count < before {
             recordDiagnostic("source", "Excluded \(before - outbox.doses.count) doses from a simulator or unknown pump")
@@ -671,7 +671,7 @@ public final class GlookoService: Service {
     /// An original dose wins. A settings fallback must cover its own delivery time without a drug change.
     private func reportedInsulinName(for dose: SourceDose) -> String? {
         if let name = dose.insulinName { return name }
-        guard let context = contexts.last(where: { $0.date <= dose.start }), let name = context.insulinName,
+        guard dose.manual != true, let context = contexts.last(where: { $0.date <= dose.start }), let name = context.insulinName,
               !contexts.contains(where: { $0.date > dose.start && $0.date < dose.end && $0.insulinName != name }) else { return nil }
         return name
     }
@@ -1184,7 +1184,6 @@ extension GlookoService: RemoteDataService {
 
     // Loop follows each changed query with an empty callback. Commit only after that drain boundary.
     public var doseDataLimit: Int? { nil }
-    public var doseDataIncludesOtherApps: Bool { false }
     public var glucoseDataLimit: Int? { queue.sync { glucoseEnabled ? 500 : 0 } }
 
     public func uploadDoseData(created: [DoseEntry], deleted: [DoseEntry]) async throws {

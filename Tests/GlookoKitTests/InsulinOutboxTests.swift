@@ -113,6 +113,14 @@ final class InsulinOutboxTests: XCTestCase {
         XCTAssertEqual(outbox.due.map(\.units), [1.5])
     }
 
+    /// Another app can save a basal injection as a single moment. It counts once, in the hour containing it.
+    func testAnInstantBasalCountsInTheHourContainingIt() {
+        var outbox = InsulinOutbox(reportingStart: hour)
+        outbox.stage(created: [temp("pump", 0, 120, 1), SourceDose(id: "pen", kind: .basal, start: at(60), end: at(60), delivered: 20)], deleted: [])
+        outbox.refresh(now: at(180), utcOffset: utc)
+        XCTAssertEqual(outbox.due.map(\.units), [0.5, 20.5])
+    }
+
     /// A running temporary basal holds back its hour until Loop finalises the delivered volume.
     func testARunningDeliveryHoldsBackItsHour() {
         var outbox = InsulinOutbox(reportingStart: hour)

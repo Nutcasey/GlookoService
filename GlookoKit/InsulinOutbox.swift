@@ -1,6 +1,6 @@
 import Foundation
 
-/// Delivered insulin reported as Glooko insulin entries with no medication (`PUT /api/v2/insulins`, answered with 204).
+/// Insulin reported as Glooko insulin entries with no medication (`PUT /api/v2/insulins`, answered with 204).
 /// `medicationGuid: null` keeps the declared basal/bolus type; naming a rapid-acting drug would turn basal into bolus,
 /// and naming a long-acting one would invent an injection. Each bolus is one entry. Basal is the delivered volume of
 /// each local clock hour, so the rate, temporary basal and suspension timeline is not represented.
@@ -22,6 +22,8 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
         /// The end of a basal hour aligned to the local clock. Nil for boluses and for hours aligned to
         /// UTC before local hours were introduced, which always end on the next UTC hour.
         public var end: Date? = nil
+        /// True for a logged dose, which Glooko shows as manual rather than device-delivered.
+        public var manual: Bool? = nil
     }
 
     public struct Tracked: Codable, Equatable, Sendable {
@@ -96,7 +98,7 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
             let old = entries[guid]?.current ?? resolved.previous
             wanted[guid] = Entry(guid: guid, kind: .bolus, start: dose.start, units: units, deleted: false,
                                  externalID: "loop:bolus:\(guid.prefix(8).lowercased())", name: Self.displayName([insulinName(dose)]),
-                                 utcOffset: old?.start == dose.start ? old?.utcOffset : utcOffset(dose.start))
+                                 utcOffset: old?.start == dose.start ? old?.utcOffset : utcOffset(dose.start), manual: dose.manual)
         }
         let horizon = basalHorizon(now: now)
         let localFrom = localHoursFrom ?? .distantFuture
@@ -300,11 +302,12 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
     /// Delivered volume inside the interval, proportionally split. Measured volume wins over programmed rate.
     static func basalVolume(_ dose: SourceDose, from: Date, to: Date) -> Double {
         guard dose.kind == .basal || dose.kind == .tempBasal, !dose.isMutable else { return 0 }
-        let overlap = min(dose.end, to).timeIntervalSince(max(dose.start, from))
-        guard overlap > 0 else { return 0 }
         let duration = dose.end.timeIntervalSince(dose.start)
         let total = dose.delivered ?? (dose.rate ?? 0) * duration / 3600
-        return duration > 0 ? total * overlap / duration : 0
+        // Another app can save a basal injection as a single moment; it belongs to the hour containing it.
+        guard duration > 0 else { return dose.start >= from && dose.start < to ? total : 0 }
+        let overlap = min(dose.end, to).timeIntervalSince(max(dose.start, from))
+        return overlap > 0 ? total * overlap / duration : 0
     }
 
     static func rounded(_ units: Double) -> Double { (units * 1000).rounded() / 1000 }
@@ -318,10 +321,10 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
 }
 
 public extension GlookoRecords {
-    /// A delivered insulin entry with no medication. Glooko counts it as device insulin of the declared type.
+    /// An insulin entry with no medication. Glooko counts it as device insulin of the declared type unless it was logged by hand.
     static func deliveredInsulin(_ entry: InsulinOutbox.Entry, timeZone: TimeZone) -> [String: Any] {
         insulin(guid: entry.guid, timestamp: entry.start, units: entry.units, type: entry.kind.rawValue,
-                deleted: entry.deleted, extra: ["medicationGuid": NSNull(), "deviceDelivered": 1, "externalId": entry.externalID,
+                deleted: entry.deleted, extra: ["medicationGuid": NSNull(), "deviceDelivered": entry.manual == true ? 0 : 1, "externalId": entry.externalID,
                                                "name": entry.name ?? "Insulin via Loop"],
                 timeZone: entry.utcOffset.flatMap(TimeZone.init(secondsFromGMT:)) ?? timeZone)
     }
@@ -391,7 +394,7 @@ public extension GlookoClient {
             let medication = record["medicationGuid"]
             return units.map { abs($0 - entry.units) < 0.0005 } == true &&
                 record["insulinType"] as? String == entry.kind.rawValue &&
-                (record["deviceDelivered"] as? Bool) == true && (medication == nil || medication is NSNull) &&
+                (record["deviceDelivered"] as? Bool) == (entry.manual != true) && (medication == nil || medication is NSNull) &&
                 (entry.name == nil || record["name"] as? String == entry.name) &&
                 stamp == WallClock(timeZone: entry.utcOffset.flatMap(TimeZone.init(secondsFromGMT:)) ?? timeZone).string(entry.start).prefix(19)
         default: return false

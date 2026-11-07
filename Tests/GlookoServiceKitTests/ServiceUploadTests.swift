@@ -1,7 +1,6 @@
 import XCTest
 import HealthKit
 import LoopKit
-import LoopAlgorithm
 import ObjectiveC.runtime
 import GlookoServiceKit
 
@@ -71,7 +70,7 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertTrue(predicate(), "Expected the observable operation to finish before its deadline")
     }
 
-    private func completeSettings(insulinType: InsulinType? = nil, date: Date? = nil, zone: TimeZone = TimeZone(secondsFromGMT: 0)!) -> StoredSettings {
+    private func completeSettings(insulinType: InsulinType? = nil, date: Date? = nil, zone: TimeZone = TimeZone(secondsFromGMT: 0)!, pumpDevice: HKDevice? = nil) -> StoredSettings {
         let settings = StoredSettings(date: start.addingTimeInterval(-1), maximumBasalRatePerHour: 3, maximumBolus: 10,
             suspendThreshold: GlucoseThreshold(unit: .milligramsPerDeciliter, value: 75),
             basalRateSchedule: BasalRateSchedule(dailyItems: [.init(startTime: 0, value: 1)], timeZone: zone),
@@ -85,8 +84,35 @@ final class ServiceUploadTests: XCTestCase {
             maximumBasalRatePerHour: settings.maximumBasalRatePerHour, maximumBolus: settings.maximumBolus,
             suspendThreshold: settings.suspendThreshold, insulinType: insulinType, basalRateSchedule: settings.basalRateSchedule,
             insulinSensitivitySchedule: settings.insulinSensitivitySchedule, carbRatioSchedule: settings.carbRatioSchedule,
-            pumpDevice: settings.pumpDevice)
+            pumpDevice: pumpDevice ?? settings.pumpDevice)
         return complete
+    }
+
+    /// A logged dose is real insulin whatever the pump is. Glooko must show it as manual, not as the pump's drug.
+    func testLoggedDoseIsSentAsManualEvenWithoutARealPump() async throws {
+        let service = try await signedIn(historyStart: start)
+        let simulator = HKDevice(name: "MockPumpManager", manufacturer: "LoopKit", model: "Simulator", hardwareVersion: nil,
+                                 firmwareVersion: nil, softwareVersion: nil, localIdentifier: "simulated", udiDeviceIdentifier: nil)
+        try await service.uploadSettingsData([completeSettings(insulinType: .novolog, pumpDevice: simulator)])
+        try await service.uploadSettingsData([])
+        let logged = DoseEntry(type: .bolus, startDate: start.addingTimeInterval(600), value: 2, unit: .units, decisionId: nil,
+                               deliveredUnits: 2, syncIdentifier: "logged", manuallyEntered: true)
+        let simulated = DoseEntry(type: .bolus, startDate: start.addingTimeInterval(900), value: 3, unit: .units, decisionId: nil,
+                                  deliveredUnits: 3, syncIdentifier: "simulated")
+        try await service.uploadDoseData(created: [logged, simulated], deleted: [])
+        try await service.uploadDoseData(created: [], deleted: [])
+        await service.uploadIfNeeded(force: true)
+        try await eventually { !OfflineGlooko.insulinRecords.isEmpty && service.summary.pendingDoses == 0 }
+        let row = try XCTUnwrap(OfflineGlooko.insulinRecords.first)
+        XCTAssertEqual(OfflineGlooko.insulinRecords.count, 1, "Simulated delivery must stay out")
+        XCTAssertEqual((row["value"] as? NSNumber)?.doubleValue, 2)
+        XCTAssertEqual(row["deviceDelivered"] as? Int, 0)
+        XCTAssertEqual(row["name"] as? String, "Insulin via Loop")
+
+        try await service.uploadDoseData(created: [], deleted: [logged])
+        try await service.uploadDoseData(created: [], deleted: [])
+        await service.uploadIfNeeded(force: true)
+        try await eventually { OfflineGlooko.insulinRecords.first?["softDeleted"] as? Int == 1 }
     }
 
     /// The adapter must retain per-dose insulin and time settings fallbacks to delivery, not upload time.

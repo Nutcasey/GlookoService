@@ -40,6 +40,8 @@ GlookoService is a reporting plugin for [Loop](https://loopkit.github.io/loopdoc
 | Loop data | What Glooko receives | What is left out |
 |---|---|---|
 | Finished pump bolus | One delivered bolus entry, using delivered units when available | Automatic/manual distinction, recommendation details and the original programmed amount |
+| Dose logged in Loop, such as a pen injection | One bolus entry that Glooko shows as manual, not device-delivered | Its link to Glooko's pen and medication catalogues |
+| Insulin other apps saved to Apple Health | The same basal or bolus entries as pump delivery. Loop counts this insulin too, so Glooko shows what Loop doses against | Which app it came from: Loop's dose query doesn't include the source |
 | Basal and temporary basal delivery | Delivered units totalled for each local clock hour | Basal-rate profiles, temporary-basal intervals, suspensions and zero-delivery hours |
 | Carb entered in Loop | A standalone food entry with grams and time | Meal type, food description, absorption time and other nutrition |
 | Insulin selection | A text name such as `Fiasp via Loop`, attached to each delivery | A link to Glooko's medication catalogue |
@@ -47,7 +49,7 @@ GlookoService is a reporting plugin for [Loop](https://loopkit.github.io/loopdoc
 | Therapy settings and pump status | Used locally to identify the source, timing and insulin | Nothing: settings are not uploaded and no pump is registered in Glooko |
 
 What is never sent:
-- **Excluded from insulin:** manually entered insulin doses, the Pump Simulator and sources without an identifiable real pump.
+- **Excluded from insulin:** the Pump Simulator and sources without an identifiable real pump. Doses logged in Loop are the exception, because they don't depend on a pump.
 - **Excluded from glucose:** CGM Simulator readings.
 - **Excluded from carbs:** carbs other apps wrote to Apple Health.
 
@@ -83,7 +85,7 @@ Loop development/
 2. Add `GlookoServiceKitPlugin` to the **LoopWorkspace** scheme's Build action.
 3. Build that scheme, so the matching LoopKit products and the plugin are built together.
 
-The host must query restored services, publish restored device metadata and pass Glooko's dose-source filter into LoopKit. Without the dose-source patches the plugin still builds, but insulin other apps saved to Apple Health is then sent as pump insulin. The integration guide includes current Loop and LoopKit patches. Its older `dev` patch is historical.
+The host must query restored services and publish restored device metadata. The integration guide includes a current Loop patch. Its older `dev` patch is historical.
 
 Once installed, **Glooko** appears under Loop **Settings → Services → Add Service**. If it doesn't, check the workspace, the scheme and that the plugin is embedded before trying to sign in.
 
@@ -165,7 +167,7 @@ Turning it back on resumes the retained work. It can't take back a reading Glook
 
 ### Carbs
 
-Carbs you enter in Loop are always sent, soon after you save them. Carbs other apps wrote to Apple Health aren't sent, the same as their insulin, because they may already reach Glooko another way. **Last confirmed** and **Waiting to send** show their state. Editing a carb entry in Loop updates the same Glooko food entry, and deleting it deletes that entry.
+Carbs you enter in Loop are always sent, soon after you save them. Carbs other apps wrote to Apple Health aren't sent, because they may already reach Glooko another way. **Last confirmed** and **Waiting to send** show their state. Editing a carb entry in Loop updates the same Glooko food entry, and deleting it deletes that entry.
 
 ### Sending
 
@@ -262,7 +264,7 @@ The service saves each change from Loop before acknowledging it. Nothing is lost
 - **Boluses and basal:** finished boluses become individual entries. Basal delivery is totalled per local clock hour in Loop's therapy time zone, using measured delivered volume when available. In a half-hour zone such as India the hours run 10:00-11:00 local time, not 10:30-11:30. After travel to a zone with a different half-hour offset, one hour is shortened to reach the new local clock. Hours sent by earlier versions, which followed UTC, are left as they are. A running or still-changing delivery holds back an unfinished hour.
 - **Confirmation:** an entry stays queued until Glooko returns it with the expected identity, amount, time, delivery kind, flags and name. An accepted HTTP request alone is not confirmation.
 - **Stable identities:** a retry updates the same entry rather than creating a copy. Changes and deletions in Loop are applied to those entries. If a deleted entry is needed again, it gets a new revision, because Glooko doesn't revive a deleted ID.
-- **Source checks:** with the dose-source patches applied, the host excludes doses from other HealthKit apps while their original provenance is still available. Without them those doses reach the service and are sent; the service can't tell. A connected pump alone does not establish a dose's source.
+- **Source checks:** simulator and unidentified pumps are excluded. Otherwise every dose Loop holds is sent, including insulin other apps saved to Apple Health, so Glooko matches the insulin Loop counts. Loop's dose query doesn't say which app a dose came from, so the service can't label or deduplicate that insulin: if the other app also sends to Glooko, it appears twice, and it's marked device-delivered.
 - **Retention:** complete local days (UTC days for hours sent by earlier versions) and their source intervals are retained together, because each day's hours are rounded from one running total. A saved recomputation boundary prevents an older hour being recreated from partial delivery evidence.
 
 **Carbs** have their own queue and retries. An edit updates the same food entry, and a deletion soft-deletes it. A failed carb upload retries without needing another change in Loop.
@@ -333,7 +335,7 @@ iOS can suspend Loop. Network, the Wi-Fi-only setting, sign-in state and Loop's 
 - **Glucose:** appears on the glucose graphs. Include the **Abbott/CSV** source when filtering. That label comes from Glooko's LibreView importer and doesn't identify the actual sensor.
 - **Avoid duplicate glucose:** if a separate CGM connection already sends your readings to Glooko, turn off **Send glucose**.
 
-Glooko [distinguishes device-delivered from manually entered insulin](https://support.glooko.com/hc/en-gb/articles/360001739738-How-is-my-insulin-data-displayed-in-the-Glooko-app), and these entries are marked device-delivered. That still doesn't make them a full pump timeline, a settings report or an official Loop integration.
+Glooko [distinguishes device-delivered from manually entered insulin](https://support.glooko.com/hc/en-gb/articles/360001739738-How-is-my-insulin-data-displayed-in-the-Glooko-app), and these entries are marked device-delivered, apart from doses logged in Loop, which are marked manual. That still doesn't make them a full pump timeline, a settings report or an official Loop integration.
 
 ## Troubleshooting
 
@@ -381,9 +383,11 @@ Neither option touches data in Glooko or Loop's own records. Turning off **Send 
 - **Travel and clock changes:** queued insulin and carbs retain their original reporting offsets through retries, edits and restarts. Older queued entries recover their existing Glooko timestamps before an edit or resend; a failed migration leaves them unchanged. Travel before Loop recorded a time-zone context, and repeated CSV clock minutes, cannot be fully reconstructed.
 - **How far back:** only history Loop still holds, plus locally kept upload records, can be recovered. The insulin and glucose queues keep about 14 days and protect unconfirmed work. On upgrading an older pruned insulin cache, the partial day at its previous retention boundary is preserved as recorded rather than recomputed from possibly missing doses. Earlier incorrect remote data cannot be reconstructed from source intervals that were already discarded.
 - **Other uploaders:** records already imported stay in Glooko. Data from separately connected uploaders isn't deduplicated against these entries.
+- **No real pump:** Loop's dose query doesn't identify the source of a dose, so without an identifiable real pump only doses logged in Loop are sent. Other apps' insulin waits with the rest.
+- **Long-acting insulin from other apps:** an entry saved as basal is added to the basal total for its hour, not shown as its own injection.
 - **Glucose CSV:** times are to the minute. Corrections, and repeated clock minutes with different offsets, can't be represented safely, so those readings are skipped and recorded rather than blocking the page. Values are sent to 0.01 mg/dL, and the originals stay in local storage.
 - **Glucose source label:** glucose shows as Abbott/CSV in Glooko, even for Dexcom. No route that keeps the native source has been found: the patient API's CGM PUT route returned "Not available".
-- **Not uploaded:** manual injections, meal descriptions, insulin concentrations and catalogue medication links.
+- **Not uploaded:** meal descriptions, insulin concentrations and catalogue medication links.
 - **Not supported:** other Glooko regions, two-step sign-in and a supported public OAuth write route.
 
 Earlier versions sent insulin through a virtual Omnipod pump-file route. **The current service doesn't use that route,** and its file encoder, ingestion checks and repair code have been removed. What remains (`PumpHistoryLog`, `LegacyPumpHistory.swift`) only decodes old stored history so existing installations can migrate:
@@ -457,6 +461,8 @@ Simulated Keychain access needs a suitably signed test host; ad hoc simulator si
 `project.yml` is the XcodeGen source. After adding source files, regenerate `GlookoService.xcodeproj` and include it in the change. The UI framework records its own Git commit, dirty flag and build date, which appear under **Help → Build**.
 
 ## Verification
+
+The **7 November 2026** insulin changes were driven on a simulator built from upstream `next-dev` (Loop `f161c29e`, LoopKit `c6192c6e`, host patch only) against a Glooko test account. A logged dose arrived as manual, Apple Health doses reached the service, and with the pump check temporarily forced open in a throwaway build they arrived as device entries, including a deletion and an instant basal counted in its hour. **35 core tests** passed in the same four time zones. **23 iOS service integration tests** passed on one full run and had one failure on another: `testGlucoseDefaultsOnSupportsDexcomLibreAndPersistsOffWithoutLosingPendingReadings` is intermittent, including on the unchanged code.
 
 The **31 October 2026** review fixes passed **34 core tests** (in London, India, Nepal and Newfoundland time) and **22 iOS service integration tests** on two consecutive runs. New cases cover the repeated hour when clocks go back and a conflicting reading already in Glooko (both skipped without stalling glucose), carbs from other apps, local basal hours in a half-hour zone, the cut-over for queues saved by earlier versions, and saved pump-file histories loading as before. On the `loop` simulator, the build installed over existing saved state reported *Up to date*, showed the skipped-readings count, and sent, confirmed and deleted a Loop carb.
 
