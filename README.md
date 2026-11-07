@@ -274,7 +274,7 @@ Insulin and carb confirmations fall back to a complete read when an already acce
 **Glucose** has its own saved queue:
 1. It waits for Loop's glucose history to finish loading.
 2. It checks which readings Glooko already has.
-3. It sends the missing ones as a LibreView-format CSV.
+3. It sends the missing ones as a LibreView-format CSV, with year-first dates. Glooko rejects a day-month file when every row falls on one day from the 1st to the 12th.
 4. A reading is confirmed only when it appears in **both** Glooko's stored CGM records and its graph data.
 
 Replaying an accepted reading doesn't create another copy. A reading that can't be represented is skipped, logged in **Recent activity** and counted in Diagnostics; the readings around it carry on. That covers the repeated hour when clocks go back (the first reading at each minute is kept), a changed value for a reading already queued, and a minute where Glooko already holds a different reading, which is never overwritten.

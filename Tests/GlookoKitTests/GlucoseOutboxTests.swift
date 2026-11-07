@@ -86,6 +86,13 @@ final class GlucoseOutboxTests: XCTestCase {
         XCTAssertNil(outbox.skipDifferentInGlooko(later.withValue(1)), "Only the stored reading can be set aside")
     }
 
+    /// Glooko rejects a day-month file (HTTP 400) when every row falls on one day from the 1st to the 12th.
+    func testTheCSVDatesCantBeMisreadOnTheFirstTwelveDaysOfAMonth() throws {
+        let instant = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-05T00:06:00Z"))
+        let csv = String(decoding: GlucoseOutbox.csv([SourceGlucose(id: "a", date: instant, mgdl: 123.45, utcOffset: 3600)]), as: UTF8.self)
+        XCTAssertEqual(csv.split(separator: "\n").last.map { $0.split(separator: ",", omittingEmptySubsequences: false)[2] }, "2026-11-05 01:06")
+    }
+
     func testStorageRetainsSensorPrecisionAndNeverReplacesMissingOrDamagedAcknowledgedHistory() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent(".build/glucose-storage-\(UUID().uuidString)")

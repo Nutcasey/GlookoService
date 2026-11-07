@@ -696,7 +696,7 @@ private final class OfflineGlooko: URLProtocol {
                 if Self.failGlucoseWrite { Self.failGlucoseWrite = false; status = 500 }
                 else {
                     let lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
-                    let clock = DateFormatter(); clock.locale = Locale(identifier: "en_US_POSIX"); clock.timeZone = TimeZone(secondsFromGMT: 0); clock.dateFormat = "dd-MM-yyyy HH:mm"
+                    let clock = DateFormatter(); clock.locale = Locale(identifier: "en_US_POSIX"); clock.timeZone = TimeZone(secondsFromGMT: 0); clock.dateFormat = "yyyy-MM-dd HH:mm"
                     for line in lines.dropFirst(2) {
                         let columns = line.split(separator: ",", omittingEmptySubsequences: false)
                         guard columns.count == 19, let instant = clock.date(from: String(columns[2])), let mgdl = Double(columns[4]) else { status = 400; break }
