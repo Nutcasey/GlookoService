@@ -44,7 +44,7 @@ GlookoService is a reporting plugin for [Loop](https://loopkit.github.io/loopdoc
 | Insulin other apps saved to Apple Health | The same basal or bolus entries as pump delivery. Loop counts this insulin too, so Glooko shows what Loop doses against | Which app it came from: Loop's dose query doesn't include the source |
 | Basal and temporary basal delivery | Delivered units totalled for each local clock hour | Basal-rate profiles, temporary-basal intervals, suspensions and zero-delivery hours |
 | Carb entered in Loop | A standalone food entry with grams and time | Meal type, food description, absorption time and other nutrition |
-| Insulin selection | A text name such as `Fiasp via Loop`, attached to each delivery | A link to Glooko's medication catalogue |
+| Insulin selection | A text name such as `Bolus · Fiasp via Loop`, attached to each delivery | A link to Glooko's medication catalogue |
 | Sensor glucose, including direct Dexcom and Libre connections | CGM readings through Glooko's LibreView CSV importer, to the minute and 0.01 mg/dL | Native sensor attribution, trend arrows, and manual, display-only, qualified and simulator readings |
 | Therapy settings and pump status | Used locally to identify the source, timing and insulin | Nothing: settings are not uploaded and no pump is registered in Glooko |
 
@@ -290,9 +290,20 @@ Before a glucose request starts, its readings are marked as potentially submitte
 
 ## Insulin names and Loop attribution
 
-Each entry uses the insulin recorded on the original dose. If that's missing, it uses the settings that applied at the time. It never applies today's selection to old doses.
+Each name says what kind of dose it is, then the insulin. Glooko gives every bolus the same icon, so the kind is how you tell Loop's automatic boluses from your own.
 
 | What Loop recorded | Name in Glooko |
+|---|---|
+| A bolus Loop gave automatically | `Automatic bolus · Novolog via Loop` |
+| Any other bolus from the pump | `Bolus · Novolog via Loop` |
+| A dose logged by hand in Loop | `Logged dose · Novolog via Loop` |
+| An hour's basal total | `Basal hour · Novolog via Loop` |
+
+A bolus that Loop doesn't mark as automatic is named `Bolus`, never guessed.
+
+The insulin is the one recorded on the original dose. If that's missing, it uses the settings that applied at the time. It never applies today's selection to old doses.
+
+| What Loop recorded | Insulin in the name |
 |---|---|
 | Fiasp | `Fiasp via Loop` |
 | Humalog | `Humalog via Loop` |
@@ -307,7 +318,7 @@ The name is **text**, not a Glooko catalogue medication. Linking to catalogue ra
 
 ```json
 {
-  "name": "Fiasp via Loop",
+  "name": "Basal hour · Fiasp via Loop",
   "insulinType": "basal",
   "medicationGuid": null,
   "deviceDelivered": 1,

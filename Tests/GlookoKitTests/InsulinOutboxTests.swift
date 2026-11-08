@@ -199,7 +199,7 @@ final class InsulinOutboxTests: XCTestCase {
         let original = outbox.due
         let zone = TimeZone(secondsFromGMT: 0)!
         let labels = original.compactMap { GlookoRecords.deliveredInsulin($0, timeZone: zone)["name"] as? String }
-        XCTAssertEqual(Set(labels), ["Fiasp / Humalog via Loop", "Fiasp via Loop", "Insulin via Loop"])
+        XCTAssertEqual(Set(labels), ["Basal hour · Fiasp / Humalog via Loop", "Bolus · Fiasp via Loop", "Basal hour · Insulin via Loop"])
         sendAll(&outbox)
         var restored = try JSONDecoder().decode(InsulinOutbox.self, from: JSONEncoder().encode(outbox))
         restored.refresh(now: at(180), utcOffset: utc)
@@ -225,7 +225,8 @@ final class InsulinOutboxTests: XCTestCase {
             XCTAssertEqual(entry.units, old.units)
             XCTAssertEqual(entry.start, old.start)
             XCTAssertEqual(entry.kind, old.kind)
-            XCTAssertEqual(GlookoRecords.deliveredInsulin(entry, timeZone: zone)["name"] as? String, "Insulin via Loop")
+            XCTAssertEqual(GlookoRecords.deliveredInsulin(entry, timeZone: zone)["name"] as? String,
+                           entry.kind == .basal ? "Basal hour · Insulin via Loop" : "Bolus · Insulin via Loop")
         }
     }
 

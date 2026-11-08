@@ -107,7 +107,7 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertEqual(OfflineGlooko.insulinRecords.count, 1, "Simulated delivery must stay out")
         XCTAssertEqual((row["value"] as? NSNumber)?.doubleValue, 2)
         XCTAssertEqual(row["deviceDelivered"] as? Int, 0)
-        XCTAssertEqual(row["name"] as? String, "Insulin via Loop")
+        XCTAssertEqual(row["name"] as? String, "Logged dose · Insulin via Loop")
 
         try await service.uploadDoseData(created: [], deleted: [logged])
         try await service.uploadDoseData(created: [], deleted: [])
@@ -168,7 +168,7 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertNotNil(restored.diagnostics.state.events.first { $0.message.contains("this account's own ID") })
     }
 
-    func testSelectedInsulinUsesOriginalDosesAndHistoricalSettings() async throws {
+    func testInsulinNamesSayWhoGaveTheDoseAndTheInsulinFromTheDoseOrItsSettings() async throws {
         start = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970 / 3600) * 3600 - 10800)
         let service = try await signedIn(historyStart: start)
         try await service.uploadSettingsData([
@@ -184,21 +184,23 @@ final class ServiceUploadTests: XCTestCase {
             DoseEntry(type: .bolus, startDate: start.addingTimeInterval(5400), value: 3, unit: .units, decisionId: nil,
                       deliveredUnits: 3, syncIdentifier: "new-settings"),
             DoseEntry(type: .basal, startDate: start.addingTimeInterval(3000), endDate: start.addingTimeInterval(4200),
-                      value: 1, unit: .unitsPerHour, decisionId: nil, syncIdentifier: "spans-drug-change")
+                      value: 1, unit: .unitsPerHour, decisionId: nil, syncIdentifier: "spans-drug-change"),
+            DoseEntry(type: .bolus, startDate: start.addingTimeInterval(6000), value: 0.4, unit: .units, decisionId: nil,
+                      deliveredUnits: 0.4, syncIdentifier: "automatic", automatic: true)
         ]
         try await service.uploadDoseData(created: doses, deleted: [])
         try await service.uploadDoseData(created: [], deleted: [])
         await service.uploadIfNeeded(force: true)
-        try await eventually { OfflineGlooko.insulinRecords.filter { $0["insulinType"] as? String == "bolus" }.count == 3 }
+        try await eventually { OfflineGlooko.insulinRecords.filter { $0["insulinType"] as? String == "bolus" }.count == 4 }
         let records = OfflineGlooko.insulinRecords
-        for (units, name) in [(2.0, "Lyumjev"), (1.0, "Novolog"), (3.0, "Humalog")] {
+        for (units, name) in [(2.0, "Bolus · Lyumjev"), (1.0, "Bolus · Novolog"), (3.0, "Bolus · Humalog"), (0.4, "Automatic bolus · Humalog")] {
             let row = try XCTUnwrap(records.first { $0["insulinType"] as? String == "bolus" && ($0["value"] as? NSNumber)?.doubleValue == units })
             XCTAssertEqual(row["name"] as? String, name + " via Loop")
             XCTAssertTrue(row["medicationGuid"] is NSNull)
         }
         let basal = records.filter { $0["insulinType"] as? String == "basal" }
         XCTAssertFalse(basal.isEmpty)
-        XCTAssertTrue(basal.allSatisfy { $0["name"] as? String == "Insulin via Loop" }, "A dose spanning a settings change has no single known insulin")
+        XCTAssertTrue(basal.allSatisfy { $0["name"] as? String == "Basal hour · Insulin via Loop" }, "A dose spanning a settings change has no single known insulin")
     }
 
     private func sensor(_ id: String, _ value: Double, at offset: TimeInterval = 0, libre: Bool = false) -> StoredGlucoseSample {

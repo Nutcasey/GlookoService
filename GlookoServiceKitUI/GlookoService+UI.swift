@@ -151,7 +151,7 @@ struct SignInView: View {
                 Toggle("Save password on this iPhone", isOn: $model.rememberPassword).disabled(model.busy)
                     .accessibilityIdentifier("glooko-remember-password")
             }
-            Section(header: Text("What to send"), footer: Text("Carbs entered in Loop are always sent. Insulin appears in Glooko as basal and bolus entries named after your insulin, such as ‘Novolog via Loop’. Glucose appears as Abbott/CSV data, even from a Dexcom. Simulator data is never sent, and nothing in Loop's therapy settings changes.")) {
+            Section(header: Text("What to send"), footer: Text("Carbs entered in Loop are always sent. Insulin appears in Glooko named by kind and insulin, such as ‘Automatic bolus · Novolog via Loop’. Glucose appears as Abbott/CSV data, even from a Dexcom. Simulator data is never sent, and nothing in Loop's therapy settings changes.")) {
                 Toggle("Insulin", isOn: $model.insulinEnabled).disabled(model.busy).accessibilityIdentifier("glooko-insulin-enabled")
                 Toggle("Glucose", isOn: $model.glucoseEnabled).disabled(model.busy).accessibilityIdentifier("glooko-glucose-enabled")
             }

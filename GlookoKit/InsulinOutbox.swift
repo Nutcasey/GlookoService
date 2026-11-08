@@ -91,7 +91,7 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
         let boundary = max(reportingStart, recomputeFrom ?? reportingStart)
         // Metadata-only upgrade: keep the same GUID, amount and time. Never guess an old dose's drug.
         for (guid, tracked) in entries where !tracked.current.deleted && tracked.current.name == nil {
-            entries[guid]?.current.name = Self.displayName([nil])
+            entries[guid]?.current.name = Self.displayName(tracked.current.kind == .basal ? "Basal hour" : tracked.current.manual == true ? "Logged dose" : "Bolus", [nil])
         }
         var wanted: [String: Entry] = [:]
         for dose in doses.values where dose.kind == .bolus && dose.start >= boundary && !dose.isMutable && dose.end <= now.addingTimeInterval(-Self.bolusSettle) {
@@ -101,7 +101,7 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
             let guid = resolved.guid
             let old = entries[guid]?.current ?? resolved.previous
             wanted[guid] = Entry(guid: guid, kind: .bolus, start: dose.start, units: units, deleted: false,
-                                 externalID: "loop:bolus:\(guid.prefix(8).lowercased())", name: Self.displayName([insulinName(dose)]),
+                                 externalID: "loop:bolus:\(guid.prefix(8).lowercased())", name: Self.displayName(Self.bolusLabel(dose), [insulinName(dose)]),
                                  utcOffset: old?.start == dose.start ? old?.utcOffset : utcOffset(dose.start), manual: dose.manual)
         }
         let horizon = basalHorizon(now: now)
@@ -133,7 +133,7 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
             let guid = resolved.guid
             let old = entries[guid]?.current ?? resolved.previous
             wanted[guid] = Entry(guid: guid, kind: .basal, start: from, units: units, deleted: false,
-                                 externalID: named.externalID, name: Self.displayName(contributions.map(\.1)),
+                                 externalID: named.externalID, name: Self.displayName("Basal hour", contributions.map(\.1)),
                                  utcOffset: old?.start == from ? old?.utcOffset : utcOffset(from), end: isLocal ? to : nil)
         }
         let lastHourEnd = hours.last?.end ?? reportingStart
@@ -151,18 +151,24 @@ public struct InsulinOutbox: Codable, Equatable, Sendable {
         }
     }
 
+    /// Glooko shows every bolus with the same icon, so the name says who gave it. A bolus Loop doesn't mark as automatic is a plain bolus.
+    private static func bolusLabel(_ dose: SourceDose) -> String {
+        if dose.manual == true { return "Logged dose" }
+        return dose.automatic == true ? "Automatic bolus" : "Bolus"
+    }
+
     /// Keep the hourly quantity/identity intact if an hour contains more than one insulin.
-    private static func displayName(_ names: [String?]) -> String {
+    private static func displayName(_ kind: String, _ names: [String?]) -> String {
         let known = Set(names.compactMap { value -> String? in
             guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
             return value
         })
-        guard !known.isEmpty else { return "Insulin via Loop" }
+        guard !known.isEmpty else { return "\(kind) · Insulin via Loop" }
         var labels = known.sorted()
         if names.contains(where: { $0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false }) {
             labels.append("unknown insulin")
         }
-        return labels.joined(separator: " / ") + " via Loop"
+        return "\(kind) · " + labels.joined(separator: " / ") + " via Loop"
     }
 
     /// An hour already tracked under the shared ID stays there, so it can't be sent twice under two IDs.
