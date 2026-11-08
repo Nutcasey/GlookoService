@@ -252,7 +252,7 @@ public extension GlookoClient {
         for reading in readings {
             if before.stored[reading.minute]?.isEmpty == false || before.graph[reading.minute]?.isEmpty == false {
                 if Self.glucoseMatches(reading, before) { result.confirmed.append(reading) }
-                else { result.differentInGlooko.append(reading) }
+                else if !Self.storedAwaitingGraph(reading, before) { result.differentInGlooko.append(reading) }
             } else { pending.append(reading) }
         }
         guard !pending.isEmpty else { return result }
@@ -299,6 +299,13 @@ public extension GlookoClient {
               (stored[0]["glucoseValue"] as? NSNumber)?.intValue == reading.encodedValue,
               state.graph[reading.minute] == [reading.encodedValue] else { return false }
         return true
+    }
+
+    /// Glooko holds this exact reading but its graph doesn't show it yet. It stays due, and isn't uploaded again.
+    private static func storedAwaitingGraph(_ reading: SourceGlucose, _ state: GlucoseState) -> Bool {
+        guard let stored = state.stored[reading.minute], stored.count == 1,
+              (stored[0]["glucoseValue"] as? NSNumber)?.intValue == reading.encodedValue else { return false }
+        return state.graph[reading.minute]?.isEmpty != false
     }
 
     private func glucoseState(_ readings: [SourceGlucose]) async throws -> GlucoseState {

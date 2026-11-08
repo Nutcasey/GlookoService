@@ -211,24 +211,36 @@ final class ServiceUploadTests: XCTestCase {
                 softwareVersion: nil, localIdentifier: nil, udiDeviceIdentifier: nil))
     }
 
-    /// Clocks went back in Europe/London on 25 October 2026, repeating 01:00-01:59. Another uploader also
-    /// holds a different value at one minute. Neither may stop the readings around them reaching Glooko.
+    /// Clocks go back an hour, repeating the hour before the change. Another uploader also holds a different
+    /// value at one minute. Neither may stop the readings around them reaching Glooko. The readings must be
+    /// recent, because skipped readings are only kept for 14 days, and Foundation has no zone that falls back
+    /// on demand, so the system zone changes from UTC+1 to UTC between two pages instead.
     func testTheRepeatedHourAndAnotherSourcesReadingAreSkippedWithoutStallingGlucose() async throws {
-        let saved = NSTimeZone.default
-        NSTimeZone.default = TimeZone(identifier: "Europe/London")!
-        defer { NSTimeZone.default = saved }
-        let fallBack = Date(timeIntervalSince1970: 1_792_887_600) // 00:20 UTC, 01:20 BST
-        let service = try await signedIn(historyStart: fallBack.addingTimeInterval(-60))
+        let saved = getenv("TZ").map { String(cString: $0) }
+        func useZone(_ zone: String?) {
+            if let zone { setenv("TZ", zone, 1) } else { unsetenv("TZ") }
+            NSTimeZone.resetSystemTimeZone()
+        }
+        defer { useZone(saved) }
+        let first = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970 / 3600) * 3600 - 6 * 3600 + 1200) // 20 past the hour, at UTC+1
+        let fallBack = first.addingTimeInterval(2400)
+        let service = try await signedIn(historyStart: first.addingTimeInterval(-60))
         service.configureUploads(insulin: false, cellular: true)
         let samples = stride(from: 0, to: 7500, by: 300).map { offset in
-            StoredGlucoseSample(syncIdentifier: "dst-\(offset)", startDate: fallBack.addingTimeInterval(TimeInterval(offset)),
+            StoredGlucoseSample(syncIdentifier: "dst-\(offset)", startDate: first.addingTimeInterval(TimeInterval(offset)),
                 quantity: LoopQuantity(unit: .milligramsPerDeciliter, doubleValue: 100 + Double(offset / 300)),
                 device: HKDevice(name: "G7", manufacturer: "Dexcom", model: "G7", hardwareVersion: nil, firmwareVersion: nil,
                                  softwareVersion: nil, localIdentifier: nil, udiDeviceIdentifier: nil))
         }
-        XCTAssertEqual(samples.count, 25) // 01:20-01:55 BST, then 01:00-02:20 GMT
-        OfflineGlooko.storeGlucose(at: "25-10-2026 02:20", mgdl: 180)
-        try await service.uploadGlucoseData(samples)
+        XCTAssertEqual(samples.count, 25) // 8 at UTC+1, then 17 at UTC whose clock hour starts over
+        let conflict = fallBack.addingTimeInterval(4800) // the last reading
+        let clock = DateFormatter(); clock.locale = Locale(identifier: "en_US_POSIX"); clock.timeZone = TimeZone(secondsFromGMT: 0)
+        clock.dateFormat = "dd-MM-yyyy HH:mm"
+        OfflineGlooko.storeGlucose(at: clock.string(from: conflict), mgdl: 180)
+        useZone("Etc/GMT-1")
+        try await service.uploadGlucoseData(samples.filter { $0.startDate < fallBack })
+        useZone("UTC")
+        try await service.uploadGlucoseData(samples.filter { $0.startDate >= fallBack })
         try await service.uploadGlucoseData([])
         try await eventually(timeout: 15) { service.summary.pendingGlucose == 0 && service.diagnostics.skippedGlucose == 9 }
         XCTAssertNil(service.status.glucoseError)
@@ -236,7 +248,8 @@ final class ServiceUploadTests: XCTestCase {
         XCTAssertEqual(OfflineGlooko.glucoseValues.filter { $0 == 18000 }.count, 1, "The other uploader's value is left alone")
         let messages = service.diagnostics.state.events.filter { $0.category == "glucose skipped" }.map(\.message)
         XCTAssertEqual(messages.count, 7, "Five repeated minutes, a count for the other three, and the Glooko conflict")
-        XCTAssertTrue(messages.contains { $0.contains("2026-10-25T02:20") && $0.contains("Glooko already has") })
+        clock.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        XCTAssertTrue(messages.contains { $0.contains(clock.string(from: conflict)) && $0.contains("Glooko already has") })
         try await service.uploadGlucoseData(Array(samples.suffix(12)))
         try await service.uploadGlucoseData([])
         XCTAssertEqual(service.diagnostics.skippedGlucose, 9, "A replayed page doesn't count the same readings again")
@@ -277,6 +290,9 @@ final class ServiceUploadTests: XCTestCase {
         try await restored.uploadGlucoseData([])
         try await eventually(timeout: 15) { restored.status.glucoseDetail?.hasPrefix("0 of 1") == true }
         XCTAssertEqual(restored.summary.pendingGlucose, 1, "HTTP acceptance and raw records without the graph cannot acknowledge glucose")
+        await restored.uploadIfNeeded(force: true)
+        XCTAssertEqual(restored.summary.pendingGlucose, 1, "Its own reading waiting for the graph isn't a different reading in Glooko")
+        XCTAssertEqual(restored.diagnostics.skippedGlucose, 0)
         OfflineGlooko.hideGlucoseGraph(false)
         await restored.uploadIfNeeded(force: true)
         XCTAssertEqual(restored.summary.pendingGlucose, 0)
